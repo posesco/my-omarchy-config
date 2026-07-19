@@ -223,8 +223,13 @@ MODULE_NAMES[bash-aliases]="Bash Custom Aliases (Terraform workflows, etc.)"
 MODULE_METHODS[bash-aliases]=":" # No package to install
 MODULE_TARGETS[bash-aliases]="bash_aliases:.config/omarchy/bash_aliases"
 
+# --- Branding ---
+MODULE_NAMES[branding]="Branding (Custom screensaver)"
+MODULE_METHODS[branding]=":" # No package to install
+MODULE_TARGETS[branding]="branding:.config/omarchy/branding"
+
 # Ordered list of modules
-MODULES_LIST=("codexbar" "gentle-ai" "voxtype" "waybar" "terraform" "llama.cpp" "bash-aliases")
+MODULES_LIST=("codexbar" "gentle-ai" "voxtype" "waybar" "terraform" "llama.cpp" "bash-aliases" "branding")
 
 # ==============================================================================
 # Main Actions
