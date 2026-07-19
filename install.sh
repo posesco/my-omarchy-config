@@ -20,6 +20,7 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOTFILES_DIR="${SCRIPT_DIR}/dotfiles"
 BACKUP_DIR="${HOME}/.omarchy_config_backup_$(date +%s)"
+MODELS_CONF="${SCRIPT_DIR}/models.conf"
 
 # Formatted logs
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -311,12 +312,119 @@ run_wizard() {
         fi
     done
 
+    # 3. Offer model downloads
+    download_models
+
     echo -e "\n=============================================="
     log_success "Process completed successfully!"
     if [ -d "${BACKUP_DIR}" ]; then
         log_info "Backups of previous configurations were saved to: ${BACKUP_DIR}"
     fi
     echo -e "==============================================\n"
+}
+
+# ==============================================================================
+# Model Download Wizard
+# ==============================================================================
+
+download_models() {
+    if [ ! -f "${MODELS_CONF}" ]; then
+        log_warn "Model registry not found at ${MODELS_CONF}. Skipping model downloads."
+        return 0
+    fi
+
+    # Source the model registry
+    source "${MODELS_CONF}"
+
+    if [ ${#MODEL_IDS[@]} -eq 0 ]; then
+        log_warn "No models defined in registry. Skipping."
+        return 0
+    fi
+
+    echo -e "\n=============================================="
+    echo -e "       Model Download Wizard"
+    echo -e "==============================================\n"
+
+    echo -e "Do you want to download local AI models? (a = all, s = select, n = none)"
+    read -r model_choice
+
+    local selected_models=()
+
+    case "${model_choice}" in
+        [Aa])
+            selected_models=("${MODEL_IDS[@]}")
+            ;;
+        [Ss])
+            echo -e "\n--- LLM Models ---"
+            for mid in "${MODEL_IDS[@]}"; do
+                if [ "${MODEL_CATEGORIES[$mid]}" = "llm" ]; then
+                    _prompt_model "${mid}" && selected_models+=("${mid}")
+                fi
+            done
+
+            echo -e "\n--- Voice / ASR Models ---"
+            for mid in "${MODEL_IDS[@]}"; do
+                if [ "${MODEL_CATEGORIES[$mid]}" = "voice" ]; then
+                    _prompt_model "${mid}" && selected_models+=("${mid}")
+                fi
+            done
+            ;;
+        [Nn]|"")
+            log_info "Skipping model downloads."
+            return 0
+            ;;
+        *)
+            log_info "Skipping model downloads."
+            return 0
+            ;;
+    esac
+
+    if [ ${#selected_models[@]} -eq 0 ]; then
+        log_info "No models selected."
+        return 0
+    fi
+
+    echo -e "\n=============================================="
+    log_info "Downloading ${#selected_models[@]} model(s)..."
+    echo -e "==============================================\n"
+
+    # Ensure huggingface-cli is available for HF downloads
+    if ! command -v huggingface-cli &> /dev/null; then
+        log_info "Installing huggingface-cli (required for model downloads)..."
+        pip install -q --user huggingface_hub[cli] 2>/dev/null || true
+    fi
+
+    mkdir -p "${MODELS_DIR}"
+    mkdir -p "${MODELS_DIR}/voice"
+
+    for mid in "${selected_models[@]}"; do
+        local dest="${HOME}/${MODEL_DESTPATHS[$mid]}"
+
+        # Skip if already downloaded
+        if [ -e "${dest}" ]; then
+            log_info "${MODEL_NAMES[$mid]} already exists at ${dest}. Skipping."
+            continue
+        fi
+
+        log_info "Downloading ${MODEL_NAMES[$mid]} (${MODEL_SIZES[$mid]})..."
+        if eval "${MODEL_COMMANDS[$mid]}"; then
+            log_success "${MODEL_NAMES[$mid]} downloaded successfully."
+        else
+            log_error "Failed to download ${MODEL_NAMES[$mid]}."
+        fi
+    done
+}
+
+_prompt_model() {
+    local mid="$1"
+    local dest="${HOME}/${MODEL_DESTPATHS[$mid]}"
+    local status=""
+    if [ -e "${dest}" ]; then
+        status=" ${GREEN}[installed]${NC}"
+    fi
+    echo -ne "  ${MODEL_NAMES[$mid]} (${MODEL_SIZES[$mid]})${status} (y/n) "
+    read -r ans
+    [[ "$ans" =~ ^[Yy]$ ]]
 }
 
 # ==============================================================================
@@ -329,6 +437,7 @@ show_help() {
     echo "Options:"
     echo "  --import    Import current local configurations into the repository"
     echo "  --install   Run the interactive installation wizard (default)"
+    echo "  --models    Download local AI models only (skip package install)"
     echo "  --help      Show this help message"
 }
 
@@ -338,6 +447,9 @@ case "${1:-}" in
         ;;
     --install|"")
         run_wizard
+        ;;
+    --models)
+        download_models
         ;;
     --help)
         show_help
