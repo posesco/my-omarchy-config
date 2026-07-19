@@ -51,74 +51,78 @@ check_yay() {
 }
 
 # Procesar plantillas y reemplazar secretos de AWS SSM
+# Acepta tanto directorios como archivos individuales
 process_templates() {
-    local target_dir="$1"
-    
-    if [ ! -d "${target_dir}" ]; then
+    local target="$1"
+
+    if [ -d "${target}" ]; then
+        find "${target}" -type f -name "*.template" | while read -r template_file; do
+            _resolve_template "${template_file}"
+        done
+    elif [ -f "${target}" ] && [[ "${target}" == *.template ]]; then
+        _resolve_template "${target}"
+    fi
+}
+
+_resolve_template() {
+    local template_file="$1"
+    local final_file="${template_file%.template}"
+    log_info "Procesando plantilla: ${template_file} -> ${final_file}"
+
+    cp "${template_file}" "${final_file}"
+
+    local placeholders
+    placeholders=$(grep -o '{{SSM:[^}]*}}' "${final_file}" | sort -u || true)
+
+    if [ -z "${placeholders}" ]; then
         return 0
     fi
 
-    # Buscar todos los archivos .template recursivamente
-    find "${target_dir}" -type f -name "*.template" | while read -r template_file; do
-        local final_file="${template_file%.template}"
-        log_info "Procesando plantilla: ${template_file} -> ${final_file}"
-        
-        # Copiar plantilla al archivo destino antes de reemplazar
-        cp "${template_file}" "${final_file}"
-        
-        # Buscar patrones del tipo {{SSM:clave}}
-        local placeholders
-        placeholders=$(grep -o '{{SSM:[^}]*}}' "${final_file}" | sort -u || true)
-        
-        if [ -n "${placeholders}" ]; then
-            if ! command -v aws &> /dev/null; then
-                log_error "Se requiere 'aws' CLI configurado para resolver secretos de SSM. Saltando reemplazo."
-                continue
-            fi
-            
-            for placeholder in ${placeholders}; do
-                # Extraer la clave del secreto, ej: {{SSM:gentle-ai/openai_api_key}} -> gentle-ai/openai_api_key
-                local key
-                key=$(echo "${placeholder}" | sed -e 's/{{SSM://' -e 's/}}//')
-                local param_name="/omarchy/${key}"
-                
-                log_info "Recuperando secreto de AWS SSM: ${param_name}..."
-                
-                local secret_value
-                if secret_value=$(aws ssm get-parameter --name "${param_name}" --with-decryption --query "Parameter.Value" --output text 2>/dev/null); then
-                    if command -v python3 &> /dev/null; then
-                        # Uso de python para evitar problemas con escapar caracteres raros en sed
-                        python3 -c "
+    if ! command -v aws &> /dev/null; then
+        log_error "Se requiere 'aws' CLI configurado para resolver secretos de SSM. Saltando reemplazo."
+        return 1
+    fi
+
+    for placeholder in ${placeholders}; do
+        local key
+        key=$(echo "${placeholder}" | sed -e 's/{{SSM://' -e 's/}}//')
+        local param_name="/omarchy/${key}"
+
+        log_info "Recuperando secreto de AWS SSM: ${param_name}..."
+
+        local secret_value
+        if secret_value=$(aws ssm get-parameter --name "${param_name}" --with-decryption --query "Parameter.Value" --output text 2>/dev/null); then
+            if command -v python3 &> /dev/null; then
+                python3 -c "
 import sys
 content = open('${final_file}', 'r').read()
 replaced = content.replace('${placeholder}', sys.argv[1])
 open('${final_file}', 'w').write(replaced)
 " "${secret_value}"
-                    else
-                        local escaped_value
-                        escaped_value=$(echo -n "${secret_value}" | sed -e 's/[\/&]/\\&/g')
-                        sed -i "s|${placeholder}|${escaped_value}|g" "${final_file}"
-                    fi
-                    log_success "Secreto '${key}' inyectado correctamente."
-                else
-                    log_error "No se pudo recuperar el secreto '${param_name}' de AWS SSM."
-                    log_warn "El archivo quedará con el placeholder. Asegurate de que el secreto existe en AWS y que tu CLI tiene acceso."
-                fi
-            done
+            else
+                local escaped_value
+                escaped_value=$(echo -n "${secret_value}" | sed -e 's/[\/&]/\\&/g')
+                sed -i "s|${placeholder}|${escaped_value}|g" "${final_file}"
+            fi
+            log_success "Secreto '${key}' inyectado correctamente."
+        else
+            log_error "No se pudo recuperar el secreto '${param_name}' de AWS SSM."
+            log_warn "El archivo quedará con el placeholder. Asegurate de que el secreto existe en AWS y que tu CLI tiene acceso."
         fi
     done
 }
 
-# Crear enlace simbólico con backup previo si ya existe
+# Crear enlace simbólico con backup previo si ya existe.
+# Soporta tanto directorios como archivos individuales.
 link_dotfile() {
-    local source_path="$1"       # Relativo a DOTFILES_DIR
+    local source_path="$1"       # Relativo a DOTFILES_DIR (puede ser dir o archivo)
     local target_path="$2"       # Ruta absoluta en el HOME
 
     local full_source="${DOTFILES_DIR}/${source_path}"
 
     if [ ! -e "${full_source}" ]; then
-        log_warn "El origen ${full_source} no existe en el repositorio. Creando directorio vacío..."
-        mkdir -p "${full_source}"
+        log_warn "El origen ${full_source} no existe en el repositorio. Saltando."
+        return 1
     fi
 
     # Procesar plantillas de secretos antes de enlazar
@@ -138,7 +142,7 @@ link_dotfile() {
 
     # Crear el directorio padre del destino si no existe
     mkdir -p "$(dirname "${target_path}")"
-    
+
     # Crear el symlink
     ln -sf "${full_source}" "${target_path}"
     log_success "Enlazado: ${target_path} -> ${full_source}"
@@ -147,6 +151,14 @@ link_dotfile() {
 # ==============================================================================
 # Declaración de Módulos
 # ==============================================================================
+#
+# Cada módulo define:
+#   MODULE_NAMES    - Nombre descriptivo para el wizard
+#   MODULE_METHODS  - Comando de instalación del paquete
+#   MODULE_TARGETS  - Lista de mapeos "repo_path:home_path" separados por espacios
+#                     repo_path es relativo a dotfiles/
+#                     home_path es relativo a $HOME
+#                     Si está vacío, el módulo solo instala el paquete sin config.
 
 declare -A MODULE_NAMES
 declare -A MODULE_METHODS
@@ -155,25 +167,35 @@ declare -A MODULE_TARGETS
 # --- Codexbar CLI ---
 MODULE_NAMES[codexbar]="Codexbar CLI (Barra de estado/menú)"
 MODULE_METHODS[codexbar]="yay -S --needed codexbar-cli"
-MODULE_TARGETS[codexbar]=".config/codexbar"
+MODULE_TARGETS[codexbar]="codexbar:.config/codexbar"
 
 # --- Gentle AI ---
 MODULE_NAMES[gentle-ai]="Gentle AI (Asistente local)"
 MODULE_METHODS[gentle-ai]="curl -fsSL https://raw.githubusercontent.com/Gentleman-Programming/gentle-ai/main/scripts/install.sh | bash"
-MODULE_TARGETS[gentle-ai]=".config/gentle-ai"
+MODULE_TARGETS[gentle-ai]="gentle-ai:.config/gentle-ai"
+
+# --- Voxtype ---
+MODULE_NAMES[voxtype]="Voxtype (Dictado por voz)"
+MODULE_METHODS[voxtype]=":" # Sin instalador; se asume ya instalado
+MODULE_TARGETS[voxtype]="voxtype:.config/voxtype"
+
+# --- Waybar ---
+MODULE_NAMES[waybar]="Waybar (Barra de estado personalizada)"
+MODULE_METHODS[waybar]=":" # Viene con Omarchy; solo enlazar la config custom
+MODULE_TARGETS[waybar]="waybar:.config/waybar"
 
 # --- Terraform ---
 MODULE_NAMES[terraform]="Terraform (IaC)"
 MODULE_METHODS[terraform]="sudo pacman -S --needed terraform"
 MODULE_TARGETS[terraform]=""
 
-# --- Llama.cpp ---
-MODULE_NAMES[llama.cpp]="Llama.cpp (Inferencia de LLMs local)"
+# --- Llama.cpp + llm launcher ---
+MODULE_NAMES[llama.cpp]="Llama.cpp + LLM Launcher (Inferencia local)"
 MODULE_METHODS[llama.cpp]="yay -S --needed llama-cpp-git"
-MODULE_TARGETS[llama.cpp]=""
+MODULE_TARGETS[llama.cpp]="llama-server.conf:.config/llama-server.conf llm:.local/bin/llm"
 
 # Lista ordenada de módulos
-MODULES_LIST=("codexbar" "gentle-ai" "terraform" "llama.cpp")
+MODULES_LIST=("codexbar" "gentle-ai" "voxtype" "waybar" "terraform" "llama.cpp")
 
 # ==============================================================================
 # Acciones Principales
@@ -187,26 +209,34 @@ import_configs() {
     local imported_any=false
 
     for mod in "${MODULES_LIST[@]}"; do
-        local target=${MODULE_TARGETS[$mod]}
-        if [ -z "${target}" ]; then
+        local targets=${MODULE_TARGETS[$mod]}
+        if [ -z "${targets}" ]; then
             continue
         fi
 
-        local local_path="${HOME}/${target}"
-        local repo_path="${DOTFILES_DIR}/${mod}"
+        for mapping in ${targets}; do
+            local repo_name="${mapping%%:*}"
+            local home_rel="${mapping#*:}"
+            local local_path="${HOME}/${home_rel}"
+            local repo_path="${DOTFILES_DIR}/${repo_name}"
 
-        if [ -e "${local_path}" ]; then
-            log_info "Importando ${local_path} -> ${repo_path}..."
-            # Evitamos sobreescribir configuraciones locales si ya hay algo en el repo,
-            # pero como este es el wizard inicial, reemplazamos de forma limpia
-            rm -rf "${repo_path}"
-            mkdir -p "$(dirname "${repo_path}")"
-            cp -R "${local_path}" "${repo_path}"
-            log_success "Importado con éxito: ${mod}"
-            imported_any=true
-        else
-            log_warn "No se encontró configuración local en ${local_path} para ${mod}."
-        fi
+            if [ -e "${local_path}" ]; then
+                log_info "Importando ${local_path} -> ${repo_path}..."
+                rm -rf "${repo_path}"
+                mkdir -p "$(dirname "${repo_path}")"
+                cp -R "${local_path}" "${repo_path}"
+
+                # Preservar el bit de ejecución para scripts
+                if [ -f "${local_path}" ] && [ -x "${local_path}" ]; then
+                    chmod +x "${repo_path}"
+                fi
+
+                log_success "Importado con éxito: ${mod} (${repo_name})"
+                imported_any=true
+            else
+                log_warn "No se encontró ${local_path} para ${mod}."
+            fi
+        done
     done
 
     if [ "$imported_any" = true ]; then
@@ -214,10 +244,9 @@ import_configs() {
         log_success "¡Importación completada con éxito!"
         log_warn "¡ATENCIÓN CON LOS SECRETOS!"
         log_warn "Si las configuraciones importadas contienen contraseñas o tokens:"
-        log_warn "1. Copiá el archivo config original a un archivo terminado en '.template'."
+        log_warn "1. Copiá el archivo original a uno terminado en '.template'."
         log_warn "   (Ejemplo: dotfiles/gentle-ai/config.json -> dotfiles/gentle-ai/config.json.template)"
-        log_warn "2. Reemplazá el secreto en el archivo .template con: {{SSM:ruta/al/secreto}}"
-        log_warn "   (Ejemplo: \"api_key\": \"{{SSM:gentle-ai/openai_api_key}}\")"
+        log_warn "2. Reemplazá el secreto en el .template con: {{SSM:ruta/al/secreto}}"
         log_warn "3. Subí el .template a Git. El instalador reconstruirá el original usando AWS SSM."
         echo -e "==============================================\n"
     else
@@ -256,22 +285,28 @@ run_wizard() {
 
     for mod in "${selections[@]}"; do
         log_info "Procesando: ${MODULE_NAMES[$mod]}..."
-        
+
         # 1. Ejecutar instalación
         local cmd=${MODULE_METHODS[$mod]}
-        log_info "Ejecutando comando: $cmd"
-        if eval "$cmd"; then
-            log_success "${MODULE_NAMES[$mod]} instalado con éxito."
-        else
-            log_error "Falló la instalación de ${MODULE_NAMES[$mod]}."
-            continue
+        if [ "${cmd}" != ":" ]; then
+            log_info "Ejecutando comando: $cmd"
+            if eval "$cmd"; then
+                log_success "${MODULE_NAMES[$mod]} instalado con éxito."
+            else
+                log_error "Falló la instalación de ${MODULE_NAMES[$mod]}."
+                continue
+            fi
         fi
 
-        # 2. Configurar dotfiles si tiene target definido
-        local target=${MODULE_TARGETS[$mod]}
-        if [ -n "$target" ]; then
-            log_info "Configurando enlaces para $mod..."
-            link_dotfile "$mod" "${HOME}/${target}"
+        # 2. Configurar dotfiles si tiene targets definidos
+        local targets=${MODULE_TARGETS[$mod]}
+        if [ -n "${targets}" ]; then
+            for mapping in ${targets}; do
+                local repo_name="${mapping%%:*}"
+                local home_rel="${mapping#*:}"
+                log_info "Configurando enlace: ${repo_name} -> ~/${home_rel}"
+                link_dotfile "${repo_name}" "${HOME}/${home_rel}"
+            done
         fi
     done
 

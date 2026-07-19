@@ -37,3 +37,4 @@ terraform.rc
 dotfiles/**/.env
 dotfiles/**/secrets.conf
 dotfiles/**/*.generated
+.atl/
