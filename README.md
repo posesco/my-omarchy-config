@@ -6,8 +6,11 @@ Personal Omarchy configuration, optional packages, and secure secret management 
 
 ```
 ├── dotfiles/          # Config files linked to ~/.config/ and ~/.local/bin/
+├── lib/               # Runtime, config, model, and module installer logic
+├── tests/             # Isolated, non-network installer regression tests
 ├── terraform/         # Terraform code to provision secrets in AWS SSM Parameter Store
-├── install.sh         # Interactive wizard to import configs, install packages, and apply links
+├── install.sh         # Thin CLI entry point and module loader
+├── models.conf        # Local model metadata registry
 ├── .gitignore
 └── README.md
 ```
@@ -51,3 +54,14 @@ $HOME/.local/state/my-omarchy-config/backups/
 ```
 
 The installer prints the exact backup path when it creates one. Existing `.bashrc` content is also backed up before the aliases source line is added.
+
+Executable import, install, and model workflows also write a color-free diagnostic log to a unique file under `$XDG_STATE_HOME/my-omarchy-config/logs/`, or under `$HOME/.local/state/my-omarchy-config/logs/` when `XDG_STATE_HOME` is empty or relative. Log directories use mode `0700` and log files use mode `0600`; sourcing the installer and displaying help do not create logs.
+
+The installer is split by responsibility: `lib/runtime.sh` owns state, logging, and final status; `lib/config.sh` owns backups, templates, links, and imports; `lib/models.sh` owns model downloads; and `lib/modules.sh` owns the package/config wizard.
+
+Safe, noninteractive verification:
+
+```bash
+bash -n install.sh lib/*.sh models.conf tests/*.sh
+./tests/run.sh
+```

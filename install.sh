@@ -1,579 +1,48 @@
 #!/usr/bin/env bash
 
-# ==============================================================================
-# Omarchy Custom Setup Wizard
-# ==============================================================================
-# A modular script to install packages, link dotfiles, and manage secrets
-# securely via AWS SSM Parameter Store.
-# ==============================================================================
+# Omarchy custom setup entry point.
 
-set -euo pipefail
-
-# Colors for the UI
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-# Project directories
-: "${HOME:?HOME must be set}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOTFILES_DIR="${SCRIPT_DIR}/dotfiles"
-case "${XDG_STATE_HOME:-}" in
-    /*) STATE_HOME="${XDG_STATE_HOME}" ;;
-    *) STATE_HOME="${HOME}/.local/state" ;;
-esac
-BACKUP_ROOT="${STATE_HOME}/my-omarchy-config/backups"
-BACKUP_DIR=""
 MODELS_CONF="${SCRIPT_DIR}/models.conf"
 
-# Formatted logs
-log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
-
-# Initialize environment
-setup_environment() {
-    mkdir -p "${DOTFILES_DIR}"
-}
-
-_ensure_backup_dir() {
-    if [ -n "${BACKUP_DIR}" ]; then
-        return 0
-    fi
-
-    install -d -m 700 "${BACKUP_ROOT}"
-    BACKUP_DIR=$(mktemp -d "${BACKUP_ROOT}/$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
-    log_info "Backup directory: ${BACKUP_DIR}"
-}
-
-# Copy an existing path without following symlinks before it is changed or removed.
-backup_target() {
-    local target_path="$1"
-    local backup_rel="$2"
-
-    if [ ! -e "${target_path}" ] && [ ! -L "${target_path}" ]; then
-        return 0
-    fi
-
-    case "${backup_rel}" in
-        ""|/*|..|../*|*/..|*/../*)
-            log_error "Unsafe backup path: ${backup_rel}"
-            return 1
-            ;;
-    esac
-
-    _ensure_backup_dir
-
-    local backup_path="${BACKUP_DIR}/${backup_rel}"
-    if [ -e "${backup_path}" ] || [ -L "${backup_path}" ]; then
-        log_error "Refusing to overwrite existing backup: ${backup_path}"
-        return 1
-    fi
-
-    mkdir -p "$(dirname "${backup_path}")"
-    cp -a -- "${target_path}" "${backup_path}"
-    log_info "Backed up ${target_path} to ${backup_path}"
-}
-
-report_backup_location() {
-    if [ -n "${BACKUP_DIR}" ]; then
-        log_info "Backups of previous configurations were saved to: ${BACKUP_DIR}"
-    fi
-}
-
-# Check and install AUR helper (yay)
-check_yay() {
-    if ! command -v yay &> /dev/null; then
-        log_info "'yay' not found. Do you want to install it now? (y/n)"
-        read -r response
-        if [[ "$response" =~ ^[Yy]$ ]]; then
-            log_info "Installing yay..."
-            sudo pacman -S --needed base-devel git
-            git clone https://aur.archlinux.org/yay.git /tmp/yay
-            (cd /tmp/yay && makepkg -si --noconfirm)
-            rm -rf /tmp/yay
-        else
-            log_error "'yay' is required to install AUR packages. Aborting."
-            exit 1
-        fi
-    fi
-}
-
-# Process templates and replace secrets from AWS SSM.
-# Accepts both directories and individual files.
-process_templates() {
-    local target="$1"
-
-    if [ -d "${target}" ]; then
-        while IFS= read -r -d '' template_file; do
-            _resolve_template "${template_file}"
-        done < <(find "${target}" -type f -name "*.template" -print0)
-    elif [ -f "${target}" ] && [[ "${target}" == *.template ]]; then
-        _resolve_template "${target}"
-    fi
-}
-
-_resolve_template() {
-    local template_file="$1"
-    local final_file="${template_file%.template}"
-    log_info "Processing template: ${template_file} -> ${final_file}"
-
-    if [ -e "${final_file}" ] || [ -L "${final_file}" ]; then
-        local final_rel="${final_file#"${SCRIPT_DIR}/"}"
-        backup_target "${final_file}" "repository/${final_rel}"
-        if [ ! -f "${final_file}" ] || [ -L "${final_file}" ]; then
-            rm -rf -- "${final_file}"
-        fi
-    fi
-    cp -- "${template_file}" "${final_file}"
-
-    local placeholders
-    placeholders=$(grep -o '{{SSM:[^}]*}}' "${final_file}" | sort -u || true)
-
-    if [ -z "${placeholders}" ]; then
-        return 0
-    fi
-
-    if ! command -v aws &> /dev/null; then
-        log_error "AWS CLI is required to resolve SSM secrets. Skipping replacement."
-        return 1
-    fi
-
-    for placeholder in ${placeholders}; do
-        local key
-        key=$(echo "${placeholder}" | sed -e 's/{{SSM://' -e 's/}}//')
-        local param_name="/omarchy/${key}"
-
-        log_info "Fetching secret from AWS SSM: ${param_name}..."
-
-        local secret_value
-        if secret_value=$(aws ssm get-parameter --name "${param_name}" --with-decryption --query "Parameter.Value" --output text 2>/dev/null); then
-            if command -v python3 &> /dev/null; then
-                # Use python to avoid escaping issues with sed
-                python3 -c "
-import sys
-content = open('${final_file}', 'r').read()
-replaced = content.replace('${placeholder}', sys.argv[1])
-open('${final_file}', 'w').write(replaced)
-" "${secret_value}"
-            else
-                local escaped_value
-                escaped_value=$(echo -n "${secret_value}" | sed -e 's/[\/&]/\\&/g')
-                sed -i "s|${placeholder}|${escaped_value}|g" "${final_file}"
-            fi
-            log_success "Secret '${key}' injected successfully."
-        else
-            log_error "Could not fetch secret '${param_name}' from AWS SSM."
-            log_warn "The file will keep the placeholder. Make sure the secret exists in AWS and your CLI has access."
-        fi
-    done
-}
-
-# Create a symbolic link with a backup of the existing target if present.
-# Supports both directories and individual files.
-link_dotfile() {
-    local source_path="$1"       # Relative to DOTFILES_DIR (can be dir or file)
-    local target_path="$2"       # Absolute path in HOME
-    local target_rel="$3"        # Relative to HOME, used to mirror backup paths
-
-    local full_source="${DOTFILES_DIR}/${source_path}"
-
-    if [ ! -e "${full_source}" ]; then
-        log_warn "Source ${full_source} does not exist in the repository. Skipping."
-        return 1
-    fi
-
-    # Resolve secret templates before linking
-    process_templates "${full_source}"
-
-    local resolved_source
-    resolved_source=$(readlink -f -- "${full_source}")
-
-    # If the target exists and is not already linked to the source
-    if [ -e "${target_path}" ] || [ -L "${target_path}" ]; then
-        if [ "$(readlink -f -- "${target_path}" 2>/dev/null || true)" != "${resolved_source}" ]; then
-            backup_target "${target_path}" "home/${target_rel}"
-            rm -rf -- "${target_path}"
-        else
-            log_info "Link for ${target_path} is already configured correctly."
-            return 0
-        fi
-    fi
-
-    # Create the parent directory of the target if it doesn't exist
-    mkdir -p "$(dirname "${target_path}")"
-
-    # Create the symlink
-    ln -s -- "${full_source}" "${target_path}"
-    log_success "Linked: ${target_path} -> ${full_source}"
-
-    # Post-link hook: if this is bash_aliases, ensure .bashrc sources it
-    if [[ "${source_path}" == "bash_aliases" ]]; then
-        _ensure_bashrc_sources "${target_path}"
-    fi
-}
-
-# Inject a source line into .bashrc if it doesn't already reference the aliases file
-_ensure_bashrc_sources() {
-    local aliases_path="$1"
-    local bashrc="${HOME}/.bashrc"
-    local source_line="[[ -f \"${aliases_path}\" ]] && source \"${aliases_path}\""
-
-    if grep -qF "${aliases_path}" "${bashrc}" 2>/dev/null; then
-        log_info ".bashrc already sources ${aliases_path}."
-        return 0
-    fi
-
-    if [ -L "${bashrc}" ]; then
-        local resolved_bashrc
-        resolved_bashrc=$(readlink -f -- "${bashrc}" 2>/dev/null || true)
-        backup_target "${bashrc}" "home/.bashrc"
-        if [ -z "${resolved_bashrc}" ] || [ ! -f "${resolved_bashrc}" ]; then
-            log_error "Refusing to append through broken or non-file .bashrc symlink: ${bashrc}"
-            return 1
-        fi
-        backup_target "${resolved_bashrc}" "symlink-targets/bashrc"
-    elif [ -e "${bashrc}" ]; then
-        backup_target "${bashrc}" "home/.bashrc"
-    fi
-
-    printf '\n# Custom aliases managed by my-omarchy-config\n%s\n' "${source_line}" >> "${bashrc}"
-    log_success "Added source line to .bashrc for ${aliases_path}."
-}
-
-# ==============================================================================
-# Module Declarations
-# ==============================================================================
-#
-# Each module defines:
-#   MODULE_NAMES    - Descriptive name for the wizard
-#   MODULE_METHODS  - Package installation command
-#   MODULE_TARGETS  - List of "repo_path:home_path" mappings (space-separated)
-#                     repo_path is relative to dotfiles/
-#                     home_path is relative to $HOME
-#                     If empty, the module only installs the package without config.
-
-declare -A MODULE_NAMES
-declare -A MODULE_METHODS
-declare -A MODULE_TARGETS
-
-# --- Codexbar CLI ---
-MODULE_NAMES[codexbar]="Codexbar CLI (Status bar / menu)"
-MODULE_METHODS[codexbar]="yay -S --needed codexbar-cli"
-MODULE_TARGETS[codexbar]="codexbar:.config/codexbar"
-
-# --- Gentle AI ---
-MODULE_NAMES[gentle-ai]="Gentle AI (Local assistant)"
-MODULE_METHODS[gentle-ai]="curl -fsSL https://raw.githubusercontent.com/Gentleman-Programming/gentle-ai/main/scripts/install.sh | bash"
-MODULE_TARGETS[gentle-ai]="gentle-ai:.config/gentle-ai"
-
-# --- Voxtype ---
-MODULE_NAMES[voxtype]="Voxtype (Voice dictation)"
-MODULE_METHODS[voxtype]=":" # No installer; assumed already installed
-MODULE_TARGETS[voxtype]="voxtype:.config/voxtype"
-
-# --- Waybar ---
-MODULE_NAMES[waybar]="Waybar (Custom status bar)"
-MODULE_METHODS[waybar]=":" # Ships with Omarchy; only link custom config
-MODULE_TARGETS[waybar]="waybar:.config/waybar"
-
-# --- Terraform ---
-MODULE_NAMES[terraform]="Terraform (IaC)"
-MODULE_METHODS[terraform]="sudo pacman -S --needed terraform"
-MODULE_TARGETS[terraform]=""
-
-# --- Llama.cpp + llm launcher ---
-MODULE_NAMES[llama.cpp]="Llama.cpp + LLM Launcher (Local inference)"
-MODULE_METHODS[llama.cpp]="yay -S --needed llama-cpp-git"
-MODULE_TARGETS[llama.cpp]="llama-server.conf:.config/llama-server.conf llm:.local/bin/llm"
-
-# --- Bash Custom Aliases ---
-MODULE_NAMES[bash-aliases]="Bash Custom Aliases (Terraform workflows, etc.)"
-MODULE_METHODS[bash-aliases]=":" # No package to install
-MODULE_TARGETS[bash-aliases]="bash_aliases:.config/omarchy/bash_aliases"
-
-# --- Branding ---
-MODULE_NAMES[branding]="Branding (Custom screensaver)"
-MODULE_METHODS[branding]=":" # No package to install
-MODULE_TARGETS[branding]="branding:.config/omarchy/branding"
-
-# Ordered list of modules
-MODULES_LIST=("codexbar" "gentle-ai" "voxtype" "waybar" "terraform" "llama.cpp" "bash-aliases" "branding")
-
-# ==============================================================================
-# Main Actions
-# ==============================================================================
-
-# Import existing local configurations into the repository
-_import_config() {
-    local mod="$1"
-    local repo_name="$2"
-    local local_path="$3"
-    local repo_path="$4"
-
-    if [ ! -e "${local_path}" ]; then
-        log_warn "${local_path} not found for ${mod}."
-        return 1
-    fi
-
-    local local_resolved repo_resolved
-    local_resolved=$(readlink -f -- "${local_path}")
-    repo_resolved=$(readlink -f -- "${repo_path}" 2>/dev/null || true)
-    if [ -n "${repo_resolved}" ] && [ "${local_resolved}" = "${repo_resolved}" ]; then
-        log_info "Skipping ${local_path}; it already points to ${repo_path}."
-        return 1
-    fi
-
-    log_info "Importing ${local_path} -> ${repo_path}..."
-    if [ -e "${repo_path}" ] || [ -L "${repo_path}" ]; then
-        backup_target "${repo_path}" "repository/dotfiles/${repo_name}"
-        rm -rf -- "${repo_path}"
-    fi
-    mkdir -p "$(dirname "${repo_path}")"
-    cp -aH -- "${local_path}" "${repo_path}"
-
-    log_success "Imported successfully: ${mod} (${repo_name})"
-}
-
-import_configs() {
-    log_info "Starting import of local configurations..."
-    setup_environment
-
-    local imported_any=false
-
-    for mod in "${MODULES_LIST[@]}"; do
-        local targets=${MODULE_TARGETS[$mod]}
-        if [ -z "${targets}" ]; then
-            continue
-        fi
-
-        for mapping in ${targets}; do
-            local repo_name="${mapping%%:*}"
-            local home_rel="${mapping#*:}"
-            local local_path="${HOME}/${home_rel}"
-            local repo_path="${DOTFILES_DIR}/${repo_name}"
-
-            if _import_config "${mod}" "${repo_name}" "${local_path}" "${repo_path}"; then
-                imported_any=true
-            fi
-        done
-    done
-
-    if [ "$imported_any" = true ]; then
-        echo -e "\n=============================================="
-        log_success "Import completed successfully!"
-        log_warn "WATCH OUT FOR SECRETS!"
-        log_warn "If imported configs contain passwords or tokens:"
-        log_warn "1. Copy the original config file to one ending in '.template'."
-        log_warn "   (Example: dotfiles/gentle-ai/config.json -> dotfiles/gentle-ai/config.json.template)"
-        log_warn "2. Replace the secret in the .template file with: {{SSM:path/to/secret}}"
-        log_warn "3. Commit the .template to Git. The installer will rebuild the original using AWS SSM."
-        echo -e "==============================================\n"
-    else
-        log_warn "No local configurations found to import."
-    fi
-    report_backup_location
-}
-
-# Run the interactive installation wizard
-run_wizard() {
-    setup_environment
-    check_yay
-
-    echo -e "\n=============================================="
-    echo -e "       Omarchy Custom Setup Wizard"
-    echo -e "==============================================\n"
-    log_info "Select what you want to install/configure:"
-
-    local selections=()
-
-    for mod in "${MODULES_LIST[@]}"; do
-        echo -e "\nDo you want to install/configure ${MODULE_NAMES[$mod]}? (y/n)"
-        read -r opt
-        if [[ "$opt" =~ ^[Yy]$ ]]; then
-            selections+=("$mod")
-        fi
-    done
-
-    if [ ${#selections[@]} -eq 0 ]; then
-        log_warn "No modules selected. Exiting."
-        exit 0
-    fi
-
-    echo -e "\n=============================================="
-    log_info "Starting installation and configuration..."
-    echo -e "==============================================\n"
-
-    for mod in "${selections[@]}"; do
-        log_info "Processing: ${MODULE_NAMES[$mod]}..."
-
-        # 1. Run installation
-        local cmd=${MODULE_METHODS[$mod]}
-        if [ "${cmd}" != ":" ]; then
-            log_info "Running command: $cmd"
-            if eval "$cmd"; then
-                log_success "${MODULE_NAMES[$mod]} installed successfully."
-            else
-                log_error "Failed to install ${MODULE_NAMES[$mod]}."
-                continue
-            fi
-        fi
-
-        # 2. Configure dotfiles if targets are defined
-        local targets=${MODULE_TARGETS[$mod]}
-        if [ -n "${targets}" ]; then
-            for mapping in ${targets}; do
-                local repo_name="${mapping%%:*}"
-                local home_rel="${mapping#*:}"
-                log_info "Setting up link: ${repo_name} -> ~/${home_rel}"
-                link_dotfile "${repo_name}" "${HOME}/${home_rel}" "${home_rel}"
-            done
-        fi
-    done
-
-    # 3. Offer model downloads
-    download_models
-
-    echo -e "\n=============================================="
-    log_success "Process completed successfully!"
-    report_backup_location
-    echo -e "==============================================\n"
-}
-
-# ==============================================================================
-# Model Download Wizard
-# ==============================================================================
-
-download_models() {
-    if [ ! -f "${MODELS_CONF}" ]; then
-        log_warn "Model registry not found at ${MODELS_CONF}. Skipping model downloads."
-        return 0
-    fi
-
-    # Source the model registry
-    source "${MODELS_CONF}"
-
-    if [ ${#MODEL_IDS[@]} -eq 0 ]; then
-        log_warn "No models defined in registry. Skipping."
-        return 0
-    fi
-
-    echo -e "\n=============================================="
-    echo -e "       Model Download Wizard"
-    echo -e "==============================================\n"
-
-    echo -e "Do you want to download local AI models? (a = all, s = select, n = none)"
-    read -r model_choice
-
-    local selected_models=()
-
-    case "${model_choice}" in
-        [Aa])
-            selected_models=("${MODEL_IDS[@]}")
-            ;;
-        [Ss])
-            echo -e "\n--- LLM Models ---"
-            for mid in "${MODEL_IDS[@]}"; do
-                if [ "${MODEL_CATEGORIES[$mid]}" = "llm" ]; then
-                    _prompt_model "${mid}" && selected_models+=("${mid}")
-                fi
-            done
-
-            echo -e "\n--- Voice / ASR Models ---"
-            for mid in "${MODEL_IDS[@]}"; do
-                if [ "${MODEL_CATEGORIES[$mid]}" = "voice" ]; then
-                    _prompt_model "${mid}" && selected_models+=("${mid}")
-                fi
-            done
-            ;;
-        [Nn]|"")
-            log_info "Skipping model downloads."
-            return 0
-            ;;
-        *)
-            log_info "Skipping model downloads."
-            return 0
-            ;;
-    esac
-
-    if [ ${#selected_models[@]} -eq 0 ]; then
-        log_info "No models selected."
-        return 0
-    fi
-
-    echo -e "\n=============================================="
-    log_info "Downloading ${#selected_models[@]} model(s)..."
-    echo -e "==============================================\n"
-
-    # Ensure huggingface-cli is available for HF downloads
-    if ! command -v huggingface-cli &> /dev/null; then
-        log_info "Installing huggingface-cli (required for model downloads)..."
-        pip install -q --user huggingface_hub[cli] 2>/dev/null || true
-    fi
-
-    mkdir -p "${MODELS_DIR}"
-    mkdir -p "${MODELS_DIR}/voice"
-
-    for mid in "${selected_models[@]}"; do
-        local dest="${HOME}/${MODEL_DESTPATHS[$mid]}"
-
-        # Skip if already downloaded
-        if [ -e "${dest}" ]; then
-            log_info "${MODEL_NAMES[$mid]} already exists at ${dest}. Skipping."
-            continue
-        fi
-
-        log_info "Downloading ${MODEL_NAMES[$mid]} (${MODEL_SIZES[$mid]})..."
-        if eval "${MODEL_COMMANDS[$mid]}"; then
-            log_success "${MODEL_NAMES[$mid]} downloaded successfully."
-        else
-            log_error "Failed to download ${MODEL_NAMES[$mid]}."
-        fi
-    done
-}
-
-_prompt_model() {
-    local mid="$1"
-    local dest="${HOME}/${MODEL_DESTPATHS[$mid]}"
-    local status=""
-    if [ -e "${dest}" ]; then
-        status=" ${GREEN}[installed]${NC}"
-    fi
-    echo -ne "  ${MODEL_NAMES[$mid]} (${MODEL_SIZES[$mid]})${status} (y/n) "
-    read -r ans
-    [[ "$ans" =~ ^[Yy]$ ]]
-}
-
-# ==============================================================================
-# Script Entry Point
-# ==============================================================================
+# shellcheck source=lib/runtime.sh
+source "${SCRIPT_DIR}/lib/runtime.sh"
+# shellcheck source=lib/config.sh
+source "${SCRIPT_DIR}/lib/config.sh"
+# shellcheck source=lib/models.sh
+source "${SCRIPT_DIR}/lib/models.sh"
+# shellcheck source=lib/modules.sh
+source "${SCRIPT_DIR}/lib/modules.sh"
+
+runtime_refresh_state
 
 show_help() {
-    echo "Usage: $0 [option]"
-    echo ""
-    echo "Options:"
-    echo "  --import    Import current local configurations into the repository"
-    echo "  --install   Run the interactive installation wizard (default)"
-    echo "  --models    Download local AI models only (skip package install)"
-    echo "  --help      Show this help message"
+    printf 'Usage: %s [option]\n\n' "$0"
+    printf '%s\n' 'Options:'
+    printf '%s\n' '  --import    Import current local configurations into the repository'
+    printf '%s\n' '  --install   Run the interactive installation wizard (default)'
+    printf '%s\n' '  --models    Download local AI models only (skip package install)'
+    printf '%s\n' '  --help      Show this help message'
 }
 
 main() {
+    local workflow
+    local final_status=0
+
     case "${1:-}" in
         --import)
-            import_configs
+            workflow="import"
             ;;
         --install|"")
-            run_wizard
+            workflow="install"
             ;;
         --models)
-            download_models
+            workflow="models"
             ;;
         --help)
             show_help
+            return 0
             ;;
         *)
             log_error "Invalid option: ${1:-}"
@@ -581,8 +50,23 @@ main() {
             return 1
             ;;
     esac
+
+    if ! runtime_begin "${workflow}"; then
+        return 1
+    fi
+
+    case "${workflow}" in
+        import) import_configs ;;
+        install) run_wizard ;;
+        models) download_models ;;
+    esac
+
+    runtime_finish || final_status=$?
+    trap - ERR
+    return "${final_status}"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    set -Eeuo pipefail
     main "$@"
 fi
