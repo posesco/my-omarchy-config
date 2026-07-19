@@ -1,39 +1,43 @@
 # My Omarchy Config
 
-Este repositorio contiene mi configuración personalizada de Omarchy, paquetes opcionales y gestión segura de secretos mediante AWS SSM Parameter Store.
+Personal Omarchy configuration, optional packages, and secure secret management via AWS SSM Parameter Store.
 
-## Estructura del Proyecto
+## Project Structure
 
-*   `dotfiles/`: Contiene los archivos de configuración locales que se enlazarán en `~/.config/`.
-*   `terraform/`: Código de Terraform para declarar y aprovisionar secretos en AWS SSM Parameter Store.
-*   `install.sh`: Script interactivo (wizard) para importar configuraciones, instalar paquetes y aplicar enlaces.
+```
+├── dotfiles/          # Config files linked to ~/.config/ and ~/.local/bin/
+├── terraform/         # Terraform code to provision secrets in AWS SSM Parameter Store
+├── install.sh         # Interactive wizard to import configs, install packages, and apply links
+├── .gitignore
+└── README.md
+```
 
-## Configuración de Secretos (AWS SSM)
+## Secret Management (AWS SSM)
 
-Para evitar subir secretos en texto plano a Git, usamos AWS SSM Parameter Store.
+To avoid committing plaintext secrets to Git, we use AWS SSM Parameter Store.
 
-1.  Copia el ejemplo de variables en la carpeta `terraform/`:
+1.  Copy the example variables file:
     ```bash
     cp terraform/terraform.tfvars.example terraform/terraform.tfvars
     ```
-2.  Edita `terraform/terraform.tfvars` con tus secretos reales (este archivo está ignorado en Git).
-3.  Inicializa y aplica la configuración en AWS:
+2.  Edit `terraform/terraform.tfvars` with your real secret values (this file is git-ignored).
+3.  Initialize and apply the Terraform configuration:
     ```bash
     cd terraform
     terraform init
     terraform apply
     ```
-4.  Crea un archivo terminado en `.template` en `dotfiles/` (ej. `dotfiles/gentle-ai/config.json.template`).
-5.  Usa el marcador `{{SSM:ruta/del/secreto}}` para referenciar la clave definida en Terraform. El script `install.sh` se encargará de resolver el secreto y generar el archivo final en caliente sin comprometer el repositorio.
+4.  Create a `.template` file in `dotfiles/` (e.g. `dotfiles/gentle-ai/config.json.template`).
+5.  Use the `{{SSM:path/to/secret}}` marker to reference keys defined in Terraform. The `install.sh` script resolves secrets at runtime and generates the final file locally without compromising the repository.
 
-## Uso del Script de Instalación
+## Usage
 
-### Importar configuraciones locales al repositorio (inicial)
+### Import existing local configs into the repository (initial setup)
 ```bash
 ./install.sh --import
 ```
 
-### Ejecutar el asistente de instalación y configuración
+### Run the interactive installation and configuration wizard
 ```bash
 ./install.sh --install
 ```

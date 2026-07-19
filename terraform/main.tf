@@ -1,7 +1,7 @@
 resource "aws_ssm_parameter" "omarchy" {
   for_each = var.secrets
 
-  # Las claves del mapa se mapearán bajo el prefijo /omarchy/
+  # Map keys are mapped under the /omarchy/ prefix
   name        = "/omarchy/${each.key}"
   description = each.value.description
   type        = each.value.type

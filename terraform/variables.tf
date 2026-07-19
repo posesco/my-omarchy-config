@@ -5,7 +5,7 @@ variable "aws_region" {
 }
 
 variable "secrets" {
-  description = "Map of secrets to be stored in SSM Parameter Store for Omarchy"
+  description = "Map of secrets to store in SSM Parameter Store"
   type = map(object({
     value       = string
     description = string
