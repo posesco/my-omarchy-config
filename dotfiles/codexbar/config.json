@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "providers": [
+    {
+      "id": "codex",
+      "enabled": true
+    },
+    {
+      "id": "antigravity",
+      "enabled": true
+    },
+    {
+      "id": "gemini",
+      "enabled": false
+    },
+    {
+      "id": "opencode",
+      "enabled": false
+    },
+    {
+      "id": "claude",
+      "enabled": false
+    },
+    {
+      "id": "kiro",
+      "enabled": false
+    },
+    {
+      "id": "copilot",
+      "enabled": false
+    }
+  ]
+}

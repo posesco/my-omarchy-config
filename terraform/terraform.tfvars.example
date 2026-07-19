@@ -1,0 +1,12 @@
+secrets = {
+  "gentle-ai/openai_api_key" = {
+    value       = "change-me"
+    type        = "SecureString"
+    description = "API Key para Gentle AI (OpenAI o Anthropic)"
+  },
+  "codexbar/github_token" = {
+    value       = "change-me"
+    type        = "SecureString"
+    description = "Token de GitHub para integraciones en Codexbar"
+  }
+}
