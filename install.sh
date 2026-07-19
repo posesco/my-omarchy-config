@@ -148,6 +148,28 @@ link_dotfile() {
     # Create the symlink
     ln -sf "${full_source}" "${target_path}"
     log_success "Linked: ${target_path} -> ${full_source}"
+
+    # Post-link hook: if this is bash_aliases, ensure .bashrc sources it
+    if [[ "${source_path}" == "bash_aliases" ]]; then
+        _ensure_bashrc_sources "${target_path}"
+    fi
+}
+
+# Inject a source line into .bashrc if it doesn't already reference the aliases file
+_ensure_bashrc_sources() {
+    local aliases_path="$1"
+    local bashrc="${HOME}/.bashrc"
+    local source_line="[[ -f \"${aliases_path}\" ]] && source \"${aliases_path}\""
+
+    if grep -qF "${aliases_path}" "${bashrc}" 2>/dev/null; then
+        log_info ".bashrc already sources ${aliases_path}."
+        return 0
+    fi
+
+    echo "" >> "${bashrc}"
+    echo "# Custom aliases managed by my-omarchy-config" >> "${bashrc}"
+    echo "${source_line}" >> "${bashrc}"
+    log_success "Added source line to .bashrc for ${aliases_path}."
 }
 
 # ==============================================================================
@@ -196,8 +218,13 @@ MODULE_NAMES[llama.cpp]="Llama.cpp + LLM Launcher (Local inference)"
 MODULE_METHODS[llama.cpp]="yay -S --needed llama-cpp-git"
 MODULE_TARGETS[llama.cpp]="llama-server.conf:.config/llama-server.conf llm:.local/bin/llm"
 
+# --- Bash Custom Aliases ---
+MODULE_NAMES[bash-aliases]="Bash Custom Aliases (Terraform workflows, etc.)"
+MODULE_METHODS[bash-aliases]=":" # No package to install
+MODULE_TARGETS[bash-aliases]="bash_aliases:.config/omarchy/bash_aliases"
+
 # Ordered list of modules
-MODULES_LIST=("codexbar" "gentle-ai" "voxtype" "waybar" "terraform" "llama.cpp")
+MODULES_LIST=("codexbar" "gentle-ai" "voxtype" "waybar" "terraform" "llama.cpp" "bash-aliases")
 
 # ==============================================================================
 # Main Actions
