@@ -92,7 +92,7 @@
   },
   "custom/codexbar": {
     "format": "{}",
-    "exec": "/home/posesco/.config/waybar/codexbar-waybar.py",
+    "exec": "\"${XDG_CONFIG_HOME:-$HOME/.config}/waybar/codexbar-waybar.py\"",
     "return-type": "json",
     "interval": 60,
     "on-click": "omarchy-launch-floating-terminal-with-presentation codexbar cards"

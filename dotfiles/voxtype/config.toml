@@ -77,7 +77,7 @@ type_delay_ms = 1
 # On any failure (timeout, error), falls back to original transcription.
 #
 [output.post_process]
-command = "/home/posesco/.config/voxtype/post_process.sh"
+command = "~/.config/voxtype/post_process.sh"
 timeout_ms = 10000  # 10 second timeout for local LLM
 
 [output.notification]

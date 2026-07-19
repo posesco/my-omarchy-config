@@ -17,9 +17,15 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Project directories
+: "${HOME:?HOME must be set}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOTFILES_DIR="${SCRIPT_DIR}/dotfiles"
-BACKUP_DIR="${HOME}/.omarchy_config_backup_$(date +%s)"
+case "${XDG_STATE_HOME:-}" in
+    /*) STATE_HOME="${XDG_STATE_HOME}" ;;
+    *) STATE_HOME="${HOME}/.local/state" ;;
+esac
+BACKUP_ROOT="${STATE_HOME}/my-omarchy-config/backups"
+BACKUP_DIR=""
 MODELS_CONF="${SCRIPT_DIR}/models.conf"
 
 # Formatted logs
@@ -31,6 +37,51 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 # Initialize environment
 setup_environment() {
     mkdir -p "${DOTFILES_DIR}"
+}
+
+_ensure_backup_dir() {
+    if [ -n "${BACKUP_DIR}" ]; then
+        return 0
+    fi
+
+    install -d -m 700 "${BACKUP_ROOT}"
+    BACKUP_DIR=$(mktemp -d "${BACKUP_ROOT}/$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
+    log_info "Backup directory: ${BACKUP_DIR}"
+}
+
+# Copy an existing path without following symlinks before it is changed or removed.
+backup_target() {
+    local target_path="$1"
+    local backup_rel="$2"
+
+    if [ ! -e "${target_path}" ] && [ ! -L "${target_path}" ]; then
+        return 0
+    fi
+
+    case "${backup_rel}" in
+        ""|/*|..|../*|*/..|*/../*)
+            log_error "Unsafe backup path: ${backup_rel}"
+            return 1
+            ;;
+    esac
+
+    _ensure_backup_dir
+
+    local backup_path="${BACKUP_DIR}/${backup_rel}"
+    if [ -e "${backup_path}" ] || [ -L "${backup_path}" ]; then
+        log_error "Refusing to overwrite existing backup: ${backup_path}"
+        return 1
+    fi
+
+    mkdir -p "$(dirname "${backup_path}")"
+    cp -a -- "${target_path}" "${backup_path}"
+    log_info "Backed up ${target_path} to ${backup_path}"
+}
+
+report_backup_location() {
+    if [ -n "${BACKUP_DIR}" ]; then
+        log_info "Backups of previous configurations were saved to: ${BACKUP_DIR}"
+    fi
 }
 
 # Check and install AUR helper (yay)
@@ -57,9 +108,9 @@ process_templates() {
     local target="$1"
 
     if [ -d "${target}" ]; then
-        find "${target}" -type f -name "*.template" | while read -r template_file; do
+        while IFS= read -r -d '' template_file; do
             _resolve_template "${template_file}"
-        done
+        done < <(find "${target}" -type f -name "*.template" -print0)
     elif [ -f "${target}" ] && [[ "${target}" == *.template ]]; then
         _resolve_template "${target}"
     fi
@@ -70,7 +121,14 @@ _resolve_template() {
     local final_file="${template_file%.template}"
     log_info "Processing template: ${template_file} -> ${final_file}"
 
-    cp "${template_file}" "${final_file}"
+    if [ -e "${final_file}" ] || [ -L "${final_file}" ]; then
+        local final_rel="${final_file#"${SCRIPT_DIR}/"}"
+        backup_target "${final_file}" "repository/${final_rel}"
+        if [ ! -f "${final_file}" ] || [ -L "${final_file}" ]; then
+            rm -rf -- "${final_file}"
+        fi
+    fi
+    cp -- "${template_file}" "${final_file}"
 
     local placeholders
     placeholders=$(grep -o '{{SSM:[^}]*}}' "${final_file}" | sort -u || true)
@@ -119,6 +177,7 @@ open('${final_file}', 'w').write(replaced)
 link_dotfile() {
     local source_path="$1"       # Relative to DOTFILES_DIR (can be dir or file)
     local target_path="$2"       # Absolute path in HOME
+    local target_rel="$3"        # Relative to HOME, used to mirror backup paths
 
     local full_source="${DOTFILES_DIR}/${source_path}"
 
@@ -130,12 +189,14 @@ link_dotfile() {
     # Resolve secret templates before linking
     process_templates "${full_source}"
 
+    local resolved_source
+    resolved_source=$(readlink -f -- "${full_source}")
+
     # If the target exists and is not already linked to the source
     if [ -e "${target_path}" ] || [ -L "${target_path}" ]; then
-        if [ "$(readlink -f "${target_path}")" != "${full_source}" ]; then
-            log_info "Backing up ${target_path} to ${BACKUP_DIR}..."
-            mkdir -p "${BACKUP_DIR}/$(dirname "${source_path}")"
-            mv "${target_path}" "${BACKUP_DIR}/${source_path}"
+        if [ "$(readlink -f -- "${target_path}" 2>/dev/null || true)" != "${resolved_source}" ]; then
+            backup_target "${target_path}" "home/${target_rel}"
+            rm -rf -- "${target_path}"
         else
             log_info "Link for ${target_path} is already configured correctly."
             return 0
@@ -146,7 +207,7 @@ link_dotfile() {
     mkdir -p "$(dirname "${target_path}")"
 
     # Create the symlink
-    ln -sf "${full_source}" "${target_path}"
+    ln -s -- "${full_source}" "${target_path}"
     log_success "Linked: ${target_path} -> ${full_source}"
 
     # Post-link hook: if this is bash_aliases, ensure .bashrc sources it
@@ -166,9 +227,20 @@ _ensure_bashrc_sources() {
         return 0
     fi
 
-    echo "" >> "${bashrc}"
-    echo "# Custom aliases managed by my-omarchy-config" >> "${bashrc}"
-    echo "${source_line}" >> "${bashrc}"
+    if [ -L "${bashrc}" ]; then
+        local resolved_bashrc
+        resolved_bashrc=$(readlink -f -- "${bashrc}" 2>/dev/null || true)
+        backup_target "${bashrc}" "home/.bashrc"
+        if [ -z "${resolved_bashrc}" ] || [ ! -f "${resolved_bashrc}" ]; then
+            log_error "Refusing to append through broken or non-file .bashrc symlink: ${bashrc}"
+            return 1
+        fi
+        backup_target "${resolved_bashrc}" "symlink-targets/bashrc"
+    elif [ -e "${bashrc}" ]; then
+        backup_target "${bashrc}" "home/.bashrc"
+    fi
+
+    printf '\n# Custom aliases managed by my-omarchy-config\n%s\n' "${source_line}" >> "${bashrc}"
     log_success "Added source line to .bashrc for ${aliases_path}."
 }
 
@@ -236,6 +308,36 @@ MODULES_LIST=("codexbar" "gentle-ai" "voxtype" "waybar" "terraform" "llama.cpp" 
 # ==============================================================================
 
 # Import existing local configurations into the repository
+_import_config() {
+    local mod="$1"
+    local repo_name="$2"
+    local local_path="$3"
+    local repo_path="$4"
+
+    if [ ! -e "${local_path}" ]; then
+        log_warn "${local_path} not found for ${mod}."
+        return 1
+    fi
+
+    local local_resolved repo_resolved
+    local_resolved=$(readlink -f -- "${local_path}")
+    repo_resolved=$(readlink -f -- "${repo_path}" 2>/dev/null || true)
+    if [ -n "${repo_resolved}" ] && [ "${local_resolved}" = "${repo_resolved}" ]; then
+        log_info "Skipping ${local_path}; it already points to ${repo_path}."
+        return 1
+    fi
+
+    log_info "Importing ${local_path} -> ${repo_path}..."
+    if [ -e "${repo_path}" ] || [ -L "${repo_path}" ]; then
+        backup_target "${repo_path}" "repository/dotfiles/${repo_name}"
+        rm -rf -- "${repo_path}"
+    fi
+    mkdir -p "$(dirname "${repo_path}")"
+    cp -aH -- "${local_path}" "${repo_path}"
+
+    log_success "Imported successfully: ${mod} (${repo_name})"
+}
+
 import_configs() {
     log_info "Starting import of local configurations..."
     setup_environment
@@ -254,21 +356,8 @@ import_configs() {
             local local_path="${HOME}/${home_rel}"
             local repo_path="${DOTFILES_DIR}/${repo_name}"
 
-            if [ -e "${local_path}" ]; then
-                log_info "Importing ${local_path} -> ${repo_path}..."
-                rm -rf "${repo_path}"
-                mkdir -p "$(dirname "${repo_path}")"
-                cp -R "${local_path}" "${repo_path}"
-
-                # Preserve executable bit for scripts
-                if [ -f "${local_path}" ] && [ -x "${local_path}" ]; then
-                    chmod +x "${repo_path}"
-                fi
-
-                log_success "Imported successfully: ${mod} (${repo_name})"
+            if _import_config "${mod}" "${repo_name}" "${local_path}" "${repo_path}"; then
                 imported_any=true
-            else
-                log_warn "${local_path} not found for ${mod}."
             fi
         done
     done
@@ -286,6 +375,7 @@ import_configs() {
     else
         log_warn "No local configurations found to import."
     fi
+    report_backup_location
 }
 
 # Run the interactive installation wizard
@@ -339,7 +429,7 @@ run_wizard() {
                 local repo_name="${mapping%%:*}"
                 local home_rel="${mapping#*:}"
                 log_info "Setting up link: ${repo_name} -> ~/${home_rel}"
-                link_dotfile "${repo_name}" "${HOME}/${home_rel}"
+                link_dotfile "${repo_name}" "${HOME}/${home_rel}" "${home_rel}"
             done
         fi
     done
@@ -349,9 +439,7 @@ run_wizard() {
 
     echo -e "\n=============================================="
     log_success "Process completed successfully!"
-    if [ -d "${BACKUP_DIR}" ]; then
-        log_info "Backups of previous configurations were saved to: ${BACKUP_DIR}"
-    fi
+    report_backup_location
     echo -e "==============================================\n"
 }
 
@@ -473,22 +561,28 @@ show_help() {
     echo "  --help      Show this help message"
 }
 
-case "${1:-}" in
-    --import)
-        import_configs
-        ;;
-    --install|"")
-        run_wizard
-        ;;
-    --models)
-        download_models
-        ;;
-    --help)
-        show_help
-        ;;
-    *)
-        log_error "Invalid option: ${1:-}"
-        show_help
-        exit 1
-        ;;
-esac
+main() {
+    case "${1:-}" in
+        --import)
+            import_configs
+            ;;
+        --install|"")
+            run_wizard
+            ;;
+        --models)
+            download_models
+            ;;
+        --help)
+            show_help
+            ;;
+        *)
+            log_error "Invalid option: ${1:-}"
+            show_help
+            return 1
+            ;;
+    esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

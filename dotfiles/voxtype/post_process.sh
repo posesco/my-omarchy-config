@@ -7,7 +7,7 @@ if [ -z "$RAW_TEXT" ]; then
 fi
 
 # 1. Iniciar llama-server a demanda
-~/.local/bin/llm --port 18080 --no-warmup >/dev/null 2>&1 &
+"$HOME/.local/bin/llm" --port 18080 --no-warmup >/dev/null 2>&1 &
 LLM_PID=$!
 
 # Asegurar que limpiamos el proceso al salir del script, pase lo que pase
@@ -65,7 +65,8 @@ fi
 # 4. Registrar en el histórico (SQLite) de forma segura mediante Python
 python3 -c '
 import sqlite3, sys, os
-db_path = os.path.expanduser("~/.local/share/voxtype/history.db")
+data_home = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
+db_path = os.path.join(data_home, "voxtype/history.db")
 os.makedirs(os.path.dirname(db_path), exist_ok=True)
 conn = sqlite3.connect(db_path)
 c = conn.cursor()

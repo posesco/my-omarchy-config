@@ -37,7 +37,17 @@ To avoid committing plaintext secrets to Git, we use AWS SSM Parameter Store.
 ./install.sh --import
 ```
 
+Existing repository destinations are backed up before import. If a local config is already a symlink to the same repository destination, it is skipped to avoid replacing its own source.
+
 ### Run the interactive installation and configuration wizard
 ```bash
 ./install.sh --install
 ```
+
+Configuration targets are linked from this repository using paths derived from `$HOME`. Before an existing file, directory, or symlink is replaced, the previous target is copied to a unique timestamped directory under `$XDG_STATE_HOME/my-omarchy-config/backups/` when `XDG_STATE_HOME` is absolute, or otherwise under:
+
+```text
+$HOME/.local/state/my-omarchy-config/backups/
+```
+
+The installer prints the exact backup path when it creates one. Existing `.bashrc` content is also backed up before the aliases source line is added.

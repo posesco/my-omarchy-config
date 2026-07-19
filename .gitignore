@@ -38,3 +38,5 @@ dotfiles/**/.env
 dotfiles/**/secrets.conf
 dotfiles/**/*.generated
 .atl/
+.codegraph/**/*
+!.codegraph/.gitignore
