@@ -12,6 +12,8 @@ source "${SCRIPT_DIR}/lib/runtime.sh"
 source "${SCRIPT_DIR}/lib/config.sh"
 # shellcheck source=lib/models.sh
 source "${SCRIPT_DIR}/lib/models.sh"
+# shellcheck source=lib/samba.sh
+source "${SCRIPT_DIR}/lib/samba.sh"
 # shellcheck source=lib/modules.sh
 source "${SCRIPT_DIR}/lib/modules.sh"
 

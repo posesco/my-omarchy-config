@@ -2,7 +2,7 @@
 
 declare -Ag MODULE_NAMES=()
 declare -Ag MODULE_TARGETS=()
-declare -ag MODULES_LIST=("codexbar" "gentle-ai" "voxtype" "waybar" "terraform" "llama.cpp" "bash-aliases" "branding")
+declare -ag MODULES_LIST=("codexbar" "gentle-ai" "voxtype" "waybar" "terraform" "llama.cpp" "bash-aliases" "branding" "samba")
 
 MODULE_NAMES[codexbar]="Codexbar CLI (Status bar / menu)"
 MODULE_TARGETS[codexbar]="codexbar:.config/codexbar"
@@ -27,6 +27,9 @@ MODULE_TARGETS[bash-aliases]="bash_aliases:.config/omarchy/bash_aliases"
 
 MODULE_NAMES[branding]="Branding (Custom screensaver)"
 MODULE_TARGETS[branding]="branding:.config/omarchy/branding"
+
+MODULE_NAMES[samba]="Samba (LAN-only pandastic share)"
+MODULE_TARGETS[samba]=""
 
 check_yay() {
     if command -v yay &> /dev/null; then
@@ -80,6 +83,9 @@ _install_module() {
         llama.cpp)
             log_info "Running command: yay -S --needed llama-cpp-git"
             yay -S --needed llama-cpp-git
+            ;;
+        samba)
+            install_samba
             ;;
         *)
             log_error "Unknown module: $1"
@@ -143,10 +149,6 @@ import_configs() {
 
 run_wizard() {
     setup_environment
-    if ! check_yay; then
-        runtime_add_failure
-        return 0
-    fi
 
     printf '\n==============================================\n'
     printf '       Omarchy Custom Setup Wizard\n'
@@ -169,6 +171,16 @@ run_wizard() {
         return 0
     fi
 
+    for mod in "${selections[@]}"; do
+        if [[ "${mod}" == codexbar || "${mod}" == llama.cpp ]]; then
+            if ! check_yay; then
+                runtime_add_failure
+                return 0
+            fi
+            break
+        fi
+    done
+
     printf '\n==============================================\n'
     log_info "Starting installation and configuration..."
     printf '==============================================\n\n'
@@ -177,7 +189,7 @@ run_wizard() {
         log_info "Processing: ${MODULE_NAMES[$mod]}..."
 
         if _install_module "${mod}"; then
-            if [[ "${mod}" == codexbar || "${mod}" == gentle-ai || "${mod}" == terraform || "${mod}" == llama.cpp ]]; then
+            if [[ "${mod}" == codexbar || "${mod}" == gentle-ai || "${mod}" == terraform || "${mod}" == llama.cpp || "${mod}" == samba ]]; then
                 log_success "${MODULE_NAMES[$mod]} installed successfully."
             fi
         else
