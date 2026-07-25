@@ -24,6 +24,11 @@ assert_file_contains() {
     grep -qF -- "${expected}" "${file}" || fail "${file} does not contain ${expected}"
 }
 
+expected_personal_targets="bin/llm:.local/bin/llm bin/openweb:.local/bin/openweb bin/screen-posesco:.local/bin/screen-posesco llama-server.conf:.config/llama-server.conf"
+[[ "${MODULE_TARGETS[personal-tools]}" == "${expected_personal_targets}" ]] || fail "personal artifact mappings changed"
+[[ " ${MODULES_LIST[*]} " == *" personal-tools "* ]] || fail "personal artifacts module is not registered"
+[[ " ${MODULES_LIST[*]} " != *" terraform "* && " ${MODULES_LIST[*]} " != *" llama.cpp "* ]] || fail "removed installer modules are still registered"
+
 # Waybar runs exec values through /bin/sh -c; preserve a spaced config path as one word.
 waybar_exec=$(python3 - "${REPO_DIR}/dotfiles/waybar/config.jsonc" <<'PY'
 import json
@@ -52,6 +57,7 @@ mkdir -p "${HOME}/.config"
 printf 'old config\n' > "${HOME}/.config/llama-server.conf"
 link_dotfile "llama-server.conf" "${HOME}/.config/llama-server.conf" ".config/llama-server.conf"
 [[ -L "${HOME}/.config/llama-server.conf" ]] || fail "regular file target was not linked"
+[[ "$(readlink "${HOME}/.config/llama-server.conf")" == "${REPO_DIR}/dotfiles/llama-server.conf" ]] || fail "llama-server.conf mapped to the wrong repository source"
 
 # Back up and replace a directory.
 mkdir -p "${HOME}/.config/omarchy/branding"
@@ -63,18 +69,19 @@ link_dotfile "branding" "${HOME}/.config/omarchy/branding" ".config/omarchy/bran
 mkdir -p "${HOME}/.local/bin"
 printf '#!/usr/bin/env bash\n' > "${HOME}/old-llm"
 ln -s "${HOME}/old-llm" "${HOME}/.local/bin/llm"
-link_dotfile "llm" "${HOME}/.local/bin/llm" ".local/bin/llm"
+link_dotfile "bin/llm" "${HOME}/.local/bin/llm" ".local/bin/llm"
 [[ -L "${HOME}/.local/bin/llm" ]] || fail "symlink target was not linked"
+[[ "$(readlink "${HOME}/.local/bin/llm")" == "${REPO_DIR}/dotfiles/bin/llm" ]] || fail "llm mapped to the wrong repository source"
+
+link_dotfile "bin/openweb" "${HOME}/.local/bin/openweb" ".local/bin/openweb"
+link_dotfile "bin/screen-posesco" "${HOME}/.local/bin/screen-posesco" ".local/bin/screen-posesco"
+[[ "$(readlink "${HOME}/.local/bin/openweb")" == "${REPO_DIR}/dotfiles/bin/openweb" ]] || fail "openweb mapped to the wrong repository source"
+[[ "$(readlink "${HOME}/.local/bin/screen-posesco")" == "${REPO_DIR}/dotfiles/bin/screen-posesco" ]] || fail "screen-posesco mapped to the wrong repository source"
 
 # Back up a broken symlink as a symlink before replacing it.
 ln -s "${HOME}/missing-target" "${HOME}/.config/codexbar"
 link_dotfile "codexbar" "${HOME}/.config/codexbar" ".config/codexbar"
 [[ -L "${HOME}/.config/codexbar" ]] || fail "broken symlink target was not linked"
-
-# Back up .bashrc before appending the aliases source line.
-printf 'original bashrc\n' > "${HOME}/.bashrc"
-link_dotfile "bash_aliases" "${HOME}/.config/omarchy/bash_aliases" ".config/omarchy/bash_aliases"
-assert_file_contains "${HOME}/.bashrc" "Custom aliases managed by my-omarchy-config"
 
 backup_dirs=("${XDG_STATE_HOME}/my-omarchy-config/backups/"*)
 [[ ${#backup_dirs[@]} -eq 1 && -d "${backup_dirs[0]}" ]] || fail "expected one backup directory"
@@ -83,7 +90,6 @@ assert_file_contains "${backup_dir}/home/.config/llama-server.conf" "old config"
 assert_file_contains "${backup_dir}/home/.config/omarchy/branding/old.txt" "old branding"
 [[ -L "${backup_dir}/home/.local/bin/llm" ]] || fail "symlink backup was not preserved"
 [[ -L "${backup_dir}/home/.config/codexbar" ]] || fail "broken symlink backup was not preserved"
-assert_file_contains "${backup_dir}/home/.bashrc" "original bashrc"
 
 # A relative XDG_STATE_HOME is invalid and must fall back under the absolute HOME.
 (
@@ -112,48 +118,12 @@ _import_config "test" "sample" "${HOME}/import-source" "${DOTFILES_DIR}/sample"
 assert_file_contains "${DOTFILES_DIR}/sample/value" "local new"
 assert_file_contains "${backup_dir}/repository/dotfiles/sample/value" "repository old"
 
-# Back up a generated template target before replacing it. The apostrophe in the
-# path catches accidental interpolation into Python source.
-SCRIPT_DIR="${TEST_ROOT}/repository's files"
-mkdir -p "${SCRIPT_DIR}/generated"
-printf 'new generated {{SSM:test-secret}}\n' > "${SCRIPT_DIR}/generated/config.template"
-printf 'old generated config\n' > "${SCRIPT_DIR}/generated/config"
-chmod 600 "${SCRIPT_DIR}/generated/config"
-aws() { printf "resolved ' secret\n"; }
-_resolve_template "${SCRIPT_DIR}/generated/config.template"
-assert_file_contains "${SCRIPT_DIR}/generated/config" "new generated resolved ' secret"
-[[ "$(stat -c '%a' "${SCRIPT_DIR}/generated/config")" == 600 ]] || fail "generated secret permissions were broadened"
-assert_file_contains "${backup_dir}/repository/generated/config" "old generated config"
-
-# A generated secret destination that is a symlink must be backed up and
-# replaced with a regular file rather than overwriting the symlink target.
-printf 'old symlink target\n' > "${SCRIPT_DIR}/generated/old-target"
-printf 'new linked {{SSM:test-secret}}\n' > "${SCRIPT_DIR}/generated/linked.template"
-ln -s "${SCRIPT_DIR}/generated/old-target" "${SCRIPT_DIR}/generated/linked"
-_resolve_template "${SCRIPT_DIR}/generated/linked.template"
-unset -f aws
-[[ -f "${SCRIPT_DIR}/generated/linked" && ! -L "${SCRIPT_DIR}/generated/linked" ]] || fail "generated secret symlink was not safely replaced"
-assert_file_contains "${SCRIPT_DIR}/generated/linked" "new linked resolved ' secret"
-[[ -L "${backup_dir}/repository/generated/linked" ]] || fail "generated secret symlink backup was not preserved"
-
 # A live symlink back to the repository must never delete its own source.
 ln -s "${DOTFILES_DIR}/sample" "${HOME}/same-source"
 if _import_config "test" "sample" "${HOME}/same-source" "${DOTFILES_DIR}/sample"; then
     fail "self-referential import was not skipped"
 fi
 assert_file_contains "${DOTFILES_DIR}/sample/value" "local new"
-
-# An already-correct aliases link must still repair missing .bashrc integration.
-(
-    export HOME="${TEST_ROOT}/aliases home"
-    export XDG_STATE_HOME="${TEST_ROOT}/aliases state"
-    mkdir -p "${HOME}/.config/omarchy"
-    source "${REPO_DIR}/install.sh"
-    ln -s "${DOTFILES_DIR}/bash_aliases" "${HOME}/.config/omarchy/bash_aliases"
-    printf 'original bashrc\n' > "${HOME}/.bashrc"
-    link_dotfile "bash_aliases" "${HOME}/.config/omarchy/bash_aliases" ".config/omarchy/bash_aliases"
-    assert_file_contains "${HOME}/.bashrc" "Custom aliases managed by my-omarchy-config"
-)
 
 machine_home='/ho''me/posesco'
 if ! git -C "${REPO_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -163,4 +133,4 @@ if git -C "${REPO_DIR}" grep -nF "${machine_home}"; then
     fail "tracked files still contain a machine-specific home path"
 fi
 
-printf 'PASS: portable linking, import safety, and backups\n'
+printf 'PASS: personal artifact mappings, portable linking, import safety, and backups\n'

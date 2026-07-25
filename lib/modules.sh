@@ -2,7 +2,7 @@
 
 declare -Ag MODULE_NAMES=()
 declare -Ag MODULE_TARGETS=()
-declare -ag MODULES_LIST=("codexbar" "gentle-ai" "voxtype" "waybar" "terraform" "llama.cpp" "bash-aliases" "branding" "samba")
+declare -ag MODULES_LIST=("codexbar" "gentle-ai" "voxtype" "waybar" "personal-tools" "branding" "samba")
 
 MODULE_NAMES[codexbar]="Codexbar CLI (Status bar / menu)"
 MODULE_TARGETS[codexbar]="codexbar:.config/codexbar"
@@ -16,14 +16,8 @@ MODULE_TARGETS[voxtype]="voxtype:.config/voxtype"
 MODULE_NAMES[waybar]="Waybar (Custom status bar)"
 MODULE_TARGETS[waybar]="waybar:.config/waybar"
 
-MODULE_NAMES[terraform]="Terraform (IaC)"
-MODULE_TARGETS[terraform]=""
-
-MODULE_NAMES[llama.cpp]="Llama.cpp + LLM Launcher (Local inference)"
-MODULE_TARGETS[llama.cpp]="llama-server.conf:.config/llama-server.conf llm:.local/bin/llm"
-
-MODULE_NAMES[bash-aliases]="Bash Custom Aliases (Terraform workflows, etc.)"
-MODULE_TARGETS[bash-aliases]="bash_aliases:.config/omarchy/bash_aliases"
+MODULE_NAMES[personal-tools]="Personal Binaries and Llama Server Config"
+MODULE_TARGETS[personal-tools]="bin/llm:.local/bin/llm bin/openweb:.local/bin/openweb bin/screen-posesco:.local/bin/screen-posesco llama-server.conf:.config/llama-server.conf"
 
 MODULE_NAMES[branding]="Branding (Custom screensaver)"
 MODULE_TARGETS[branding]="branding:.config/omarchy/branding"
@@ -73,16 +67,8 @@ _install_module() {
             log_info "Running command: curl -fsSL https://raw.githubusercontent.com/Gentleman-Programming/gentle-ai/main/scripts/install.sh | bash"
             curl -fsSL https://raw.githubusercontent.com/Gentleman-Programming/gentle-ai/main/scripts/install.sh | bash
             ;;
-        voxtype|waybar|bash-aliases|branding)
+        voxtype|waybar|personal-tools|branding)
             return 0
-            ;;
-        terraform)
-            log_info "Running command: sudo pacman -S --needed terraform"
-            sudo pacman -S --needed terraform
-            ;;
-        llama.cpp)
-            log_info "Running command: yay -S --needed llama-cpp-git"
-            yay -S --needed llama-cpp-git
             ;;
         samba)
             install_samba
@@ -134,12 +120,6 @@ import_configs() {
         else
             log_warn "Import completed with failures."
         fi
-        log_warn "WATCH OUT FOR SECRETS!"
-        log_warn "If imported configs contain passwords or tokens:"
-        log_warn "1. Copy the original config file to one ending in '.template'."
-        log_warn "   (Example: dotfiles/gentle-ai/config.json -> dotfiles/gentle-ai/config.json.template)"
-        log_warn "2. Replace the secret in the .template file with: {{SSM:path/to/secret}}"
-        log_warn "3. Commit the .template to Git. The installer will rebuild the original using AWS SSM."
         printf '==============================================\n\n'
     else
         log_warn "No local configurations found to import."
@@ -172,7 +152,7 @@ run_wizard() {
     fi
 
     for mod in "${selections[@]}"; do
-        if [[ "${mod}" == codexbar || "${mod}" == llama.cpp ]]; then
+        if [[ "${mod}" == codexbar ]]; then
             if ! check_yay; then
                 runtime_add_failure
                 return 0
@@ -189,7 +169,7 @@ run_wizard() {
         log_info "Processing: ${MODULE_NAMES[$mod]}..."
 
         if _install_module "${mod}"; then
-            if [[ "${mod}" == codexbar || "${mod}" == gentle-ai || "${mod}" == terraform || "${mod}" == llama.cpp || "${mod}" == samba ]]; then
+            if [[ "${mod}" == codexbar || "${mod}" == gentle-ai || "${mod}" == samba ]]; then
                 log_success "${MODULE_NAMES[$mod]} installed successfully."
             fi
         else
@@ -213,7 +193,6 @@ run_wizard() {
         fi
     done
 
-    download_models
     report_backup_location
     printf '==============================================\n\n'
 }

@@ -13,30 +13,6 @@
 pkg/
 src/
 
-# ==============================================================================
-# Terraform Ignore Rules
-# ==============================================================================
-.terraform/
-*.tfstate
-*.tfstate.*
-crash.log
-*.tfvars
-*.tfvars.json
-override.tf
-override.tf.json
-_override.tf
-_override.tf.json
-.terraform.rc
-terraform.rc
-
-# ==============================================================================
-# Secretos y Archivos Generados Localmente
-# ==============================================================================
-# Archivos generados por install.sh a partir de plantillas .template
-# (el script elimina la extensión .template y reemplaza los placeholders SSM)
-dotfiles/**/.env
-dotfiles/**/secrets.conf
-dotfiles/**/*.generated
 .atl/
 .codegraph/**/*
 !.codegraph/.gitignore

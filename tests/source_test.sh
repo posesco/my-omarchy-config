@@ -23,9 +23,17 @@ source "${REPO_DIR}/install.sh"
 [[ "${STATE_HOME}" == "${XDG_STATE_HOME}" ]] || fail "absolute XDG_STATE_HOME was not accepted"
 [[ ! -e "${HOME}" ]] || fail "sourcing created HOME"
 [[ ! -e "${XDG_STATE_HOME}" ]] || fail "sourcing created state directories"
-declare -F run_wizard download_models link_dotfile >/dev/null || fail "installer modules were not loaded"
+declare -F run_wizard link_dotfile >/dev/null || fail "installer modules were not loaded"
+for removed_function in download_models process_templates _resolve_template; do
+    if declare -F "${removed_function}" >/dev/null; then
+        fail "removed function ${removed_function} was loaded"
+    fi
+done
+[[ ! -e "${REPO_DIR}/terraform" ]] || fail "Terraform directory still exists"
+[[ ! -e "${REPO_DIR}/models.conf" && ! -e "${REPO_DIR}/lib/models.sh" ]] || fail "model automation files still exist"
 
-show_help >/dev/null
+help_output=$(show_help)
+[[ "${help_output}" != *"--models"* ]] || fail "help still advertises the removed models workflow"
 [[ ! -e "${XDG_STATE_HOME}" ]] || fail "help created state directories"
 
 HOME="${HOME}" XDG_STATE_HOME="${XDG_STATE_HOME}" "${REPO_DIR}/install.sh" --help >/dev/null
@@ -34,6 +42,10 @@ if HOME="${HOME}" XDG_STATE_HOME="${XDG_STATE_HOME}" "${REPO_DIR}/install.sh" --
     fail "invalid option returned zero"
 fi
 [[ ! -e "${XDG_STATE_HOME}" ]] || fail "invalid option created state directories"
+if HOME="${HOME}" XDG_STATE_HOME="${XDG_STATE_HOME}" "${REPO_DIR}/install.sh" --models >/dev/null 2>&1; then
+    fail "removed models option returned zero"
+fi
+[[ ! -e "${XDG_STATE_HOME}" ]] || fail "removed models option created state directories"
 
 export HOME="${TEST_ROOT}/second home"
 export XDG_STATE_HOME=""

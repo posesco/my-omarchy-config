@@ -70,16 +70,6 @@ fallback_to_clipboard = true
 # 0 = fastest possible, increase if characters are dropped
 type_delay_ms = 1
 
-# Post-processing command (optional)
-# Pipe transcribed text through an external command for cleanup before output.
-# The command receives text on stdin and outputs processed text on stdout.
-# Useful for LLM-based text cleanup, grammar correction, filler word removal.
-# On any failure (timeout, error), falls back to original transcription.
-#
-[output.post_process]
-command = "~/.config/voxtype/post_process.sh"
-timeout_ms = 10000  # 10 second timeout for local LLM
-
 [output.notification]
 # Show notification when recording starts (hotkey pressed)
 on_recording_start = false

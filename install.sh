@@ -4,14 +4,11 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOTFILES_DIR="${SCRIPT_DIR}/dotfiles"
-MODELS_CONF="${SCRIPT_DIR}/models.conf"
 
 # shellcheck source=lib/runtime.sh
 source "${SCRIPT_DIR}/lib/runtime.sh"
 # shellcheck source=lib/config.sh
 source "${SCRIPT_DIR}/lib/config.sh"
-# shellcheck source=lib/models.sh
-source "${SCRIPT_DIR}/lib/models.sh"
 # shellcheck source=lib/samba.sh
 source "${SCRIPT_DIR}/lib/samba.sh"
 # shellcheck source=lib/modules.sh
@@ -24,7 +21,6 @@ show_help() {
     printf '%s\n' 'Options:'
     printf '%s\n' '  --import    Import current local configurations into the repository'
     printf '%s\n' '  --install   Run the interactive installation wizard (default)'
-    printf '%s\n' '  --models    Download local AI models only (skip package install)'
     printf '%s\n' '  --help      Show this help message'
 }
 
@@ -38,9 +34,6 @@ main() {
             ;;
         --install|"")
             workflow="install"
-            ;;
-        --models)
-            workflow="models"
             ;;
         --help)
             show_help
@@ -60,7 +53,6 @@ main() {
     case "${workflow}" in
         import) import_configs ;;
         install) run_wizard ;;
-        models) download_models ;;
     esac
 
     runtime_finish || final_status=$?

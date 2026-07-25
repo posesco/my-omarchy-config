@@ -53,8 +53,8 @@ if HOME="${TEST_ROOT}/trap home" XDG_STATE_HOME="${trap_state}" REPO_DIR="${REPO
     set -Eeuo pipefail
     source "${REPO_DIR}/install.sh"
     runtime_begin "trap test"
-    fail_with_secret_argument() { false "do-not-log-this-secret"; }
-    fail_with_secret_argument
+    fail_with_sensitive_argument() { false "do-not-log-this-value"; }
+    fail_with_sensitive_argument
 ' >/dev/null 2>&1; then
     trap_status=0
 else
@@ -67,11 +67,11 @@ trap_logs=("${trap_state}/my-omarchy-config/logs/"*.log)
 trap_log="${trap_logs[0]}"
 [[ "$(grep -c 'Unhandled failure:' "${trap_log}")" -eq 1 ]] || fail "trap error was missing or duplicated"
 assert_file_contains "${trap_log}" "command=false"
-assert_file_contains "${trap_log}" "function=fail_with_secret_argument"
+assert_file_contains "${trap_log}" "function=fail_with_sensitive_argument"
 assert_file_contains "${trap_log}" "source="
 assert_file_contains "${trap_log}" "line="
 assert_file_contains "${trap_log}" "status=1"
-if grep -qF 'do-not-log-this-secret' "${trap_log}"; then
+if grep -qF 'do-not-log-this-value' "${trap_log}"; then
     fail "trap logged command arguments"
 fi
 
@@ -80,7 +80,7 @@ HOME="${TEST_ROOT}/handled home" XDG_STATE_HOME="${handled_state}" REPO_DIR="${R
     set -Eeuo pipefail
     source "${REPO_DIR}/install.sh"
     runtime_begin "handled test"
-    if false "handled-secret"; then
+    if false "handled-sensitive-value"; then
         exit 99
     fi
     runtime_finish
@@ -107,11 +107,11 @@ fi
 export HOME="${TEST_ROOT}/main home"
 export XDG_STATE_HOME="${TEST_ROOT}/main state"
 source "${REPO_DIR}/install.sh"
-download_models() { runtime_add_failure; }
+run_wizard() { runtime_add_failure; }
 trap ':' ERR
 expected_err_trap=$(trap -p ERR)
 main_status=0
-if main --models >/dev/null 2>&1; then
+if main --install >/dev/null 2>&1; then
     main_status=0
 else
     main_status=$?
