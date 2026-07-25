@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly AIRPLAY_NAME="omarchy@posesco"
+readonly BASE_PORT="35000"
+readonly PORT_RANGE="${BASE_PORT}:$((BASE_PORT + 2))"
+readonly SUBNET="192.168.1.0/24"
+
+tcp_rule_added=false
+udp_rule_added=false
+mdns_rule_added=false
+sudo_keepalive_pid=""
+
+rule_exists() {
+    local destination="$1"
+    sudo -n ufw status | grep -Eq "^${destination}[[:space:]]+ALLOW[[:space:]]+${SUBNET}([[:space:]]|$)"
+}
+
+cleanup() {
+    local exit_code=$?
+    trap - EXIT INT TERM
+
+    if [[ -n "$sudo_keepalive_pid" ]]; then
+        kill "$sudo_keepalive_pid" 2>/dev/null || true
+        wait "$sudo_keepalive_pid" 2>/dev/null || true
+    fi
+
+    printf '\n[INFO] Closing temporary UxPlay firewall rules...\n'
+    if [[ "$tcp_rule_added" == true ]]; then
+        sudo -n ufw delete allow proto tcp from "$SUBNET" to any port "$PORT_RANGE" >/dev/null 2>&1 || true
+    fi
+    if [[ "$udp_rule_added" == true ]]; then
+        sudo -n ufw delete allow proto udp from "$SUBNET" to any port "$PORT_RANGE" >/dev/null 2>&1 || true
+    fi
+    if [[ "$mdns_rule_added" == true ]]; then
+        sudo -n ufw delete allow proto udp from "$SUBNET" to any port 5353 >/dev/null 2>&1 || true
+    fi
+
+    exit "$exit_code"
+}
+
+for command in uxplay ufw systemctl gst-inspect-1.0; do
+    if ! command -v "$command" >/dev/null 2>&1; then
+        printf "[ERROR] Required command '%s' is not installed.\n" "$command" >&2
+        exit 1
+    fi
+done
+
+if ! systemctl is-active --quiet avahi-daemon; then
+    printf '[ERROR] avahi-daemon is not running. Start it with:\n' >&2
+    printf '        sudo systemctl enable --now avahi-daemon\n' >&2
+    exit 1
+fi
+
+for element in waylandsink pipewiresink; do
+    if ! gst-inspect-1.0 "$element" >/dev/null 2>&1; then
+        printf "[ERROR] Required GStreamer element '%s' is unavailable.\n" "$element" >&2
+        exit 1
+    fi
+done
+
+# Authenticate once and keep the sudo timestamp alive so cleanup still works
+# after a long mirroring session.
+sudo -v
+while true; do
+    sudo -n true
+    sleep 50
+done 2>/dev/null &
+sudo_keepalive_pid=$!
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if ! rule_exists "${PORT_RANGE}/tcp"; then
+    sudo ufw allow proto tcp from "$SUBNET" to any port "$PORT_RANGE" >/dev/null
+    tcp_rule_added=true
+fi
+
+if ! rule_exists "${PORT_RANGE}/udp"; then
+    sudo ufw allow proto udp from "$SUBNET" to any port "$PORT_RANGE" >/dev/null
+    udp_rule_added=true
+fi
+
+if ! rule_exists "5353/udp"; then
+    sudo ufw allow proto udp from "$SUBNET" to any port 5353 >/dev/null
+    mdns_rule_added=true
+fi
+
+printf '%s\n' '=========================================='
+printf ' AirPlay name: %s\n' "$AIRPLAY_NAME"
+printf ' Ports:        %s-%s (TCP and UDP)\n' "$BASE_PORT" "$((BASE_PORT + 2))"
+printf ' Allowed net:  %s\n' "$SUBNET"
+printf '%s\n' ' Press Ctrl+C to stop UxPlay.'
+printf '%s\n' '=========================================='
+
+uxplay \
+    -n "$AIRPLAY_NAME" \
+    -nh \
+    -p "$BASE_PORT" \
+    -vs waylandsink \
+    -as pipewiresink \
+    -scrsv 1 \
+    "$@"
