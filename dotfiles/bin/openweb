@@ -2,13 +2,30 @@
 set -euo pipefail
 
 # Configuration
-OPENWEB_DIR="${OPENWEB_DIR:-${HOME}/.local/share/openweb}"
-LOG_DIR="${OPENWEB_DIR}/logs"
-LOG_FILE="${LOG_FILE:-${LOG_DIR}/openweb.log}"
-SUBNET="192.168.1.0/24"
-USER_SHELL="bash"
+readonly OPENWEB_DIR="${OPENWEB_DIR:-${HOME}/.local/share/openweb}"
+readonly LOG_DIR="${OPENWEB_DIR}/logs"
+readonly LOG_FILE="${LOG_FILE:-${LOG_DIR}/openweb.log}"
+readonly SUBNET="192.168.1.0/24"
+readonly USER_SHELL="bash"
 
-mkdir -p "$LOG_DIR"
+# Runtime state used by the exit trap
+firewall_rule_added=false
+session_started=false
+session_start_time=0
+session_port=""
+session_user=""
+sudo_keepalive_pid=""
+
+_require_commands() {
+    local command
+
+    for command in "$@"; do
+        if ! command -v "$command" >/dev/null 2>&1; then
+            printf "[ERROR] Required command '%s' is not installed.\n" "$command" >&2
+            return 1
+        fi
+    done
+}
 
 _openweb_log() {
     local level="$1"
@@ -17,100 +34,188 @@ _openweb_log() {
     local port="${4:-0}"
     local status="${5:-unknown}"
     local duration="${6:-0}"
-    local ts
-    ts=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-    
-    echo "ts=${ts} level=${level} event=${event} user=${ttyd_user} port=${port} status=${status} duration_s=${duration}" >> "$LOG_FILE"
+    local timestamp
+
+    timestamp=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+    printf 'ts=%s level=%s event=%s user=%s port=%s status=%s duration_s=%s\n' \
+        "$timestamp" "$level" "$event" "$ttyd_user" "$port" "$status" "$duration" >> "$LOG_FILE"
 }
 
 _openweb_get_free_port() {
+    local listeners
     local port
+
     while true; do
         port=$(shuf -i 49152-65535 -n 1)
-        if ! ss -tunl | grep -q ":${port} "; then
-            echo "$port"
+        if ! listeners=$(ss -H -tunl); then
+            return 1
+        fi
+        if ! grep -Eq ":${port}[[:space:]]" <<< "$listeners"; then
+            printf '%s\n' "$port"
             return 0
         fi
     done
 }
 
 _openweb_make_credentials() {
-    local user
-    local pass
-    user=$(LC_ALL=C tr -dc 'a-z' < /dev/urandom | head -c 6)
-    pass=$(LC_ALL=C tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 10)
-    echo "$user $pass"
+    local LC_ALL=C
+    local character
+    local password=""
+    local random_fd
+    local user=""
+
+    exec {random_fd}</dev/urandom
+    while ((${#user} < 6)); do
+        IFS= read -r -N 1 -u "$random_fd" character
+        [[ "$character" =~ [a-z] ]] && user+="$character"
+    done
+    while ((${#password} < 10)); do
+        IFS= read -r -N 1 -u "$random_fd" character
+        [[ "$character" =~ [[:alnum:]] ]] && password+="$character"
+    done
+    exec {random_fd}<&-
+
+    printf '%s %s\n' "$user" "$password"
 }
 
 _openweb_get_local_ip() {
-    local ip
-    ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7}')
-    if [[ -z "$ip" ]]; then
-        ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    local addresses
+    local ip_address=""
+    local route
+
+    route=$(ip -4 route get 1.1.1.1 2>/dev/null || true)
+    if [[ " $route " =~ [[:space:]]src[[:space:]]([^[:space:]]+) ]]; then
+        ip_address="${BASH_REMATCH[1]}"
+    else
+        addresses=$(hostname -I 2>/dev/null || true)
+        read -r ip_address _ <<< "$addresses"
     fi
-    echo "${ip:-127.0.0.1}"
+
+    printf '%s\n' "${ip_address:-127.0.0.1}"
+}
+
+_firewall_rule_exists() {
+    local firewall_status="$1"
+    local destination="$2"
+
+    grep -Eq "^${destination}[[:space:]]+ALLOW([[:space:]]+IN)?[[:space:]]+${SUBNET}([[:space:]]|$)" \
+        <<< "$firewall_status"
+}
+
+_openweb_cleanup() {
+    local exit_code=$?
+    local duration
+    local end_time
+
+    trap - EXIT INT TERM
+
+    if [[ -n "$sudo_keepalive_pid" ]]; then
+        kill "$sudo_keepalive_pid" 2>/dev/null || true
+        wait "$sudo_keepalive_pid" 2>/dev/null || true
+        sudo_keepalive_pid=""
+    fi
+
+    if [[ "$firewall_rule_added" == true ]]; then
+        printf '\n[INFO] Closing temporary OpenWeb firewall port %s...\n' "$session_port"
+        sudo -n ufw delete allow proto tcp from "$SUBNET" to any port "$session_port" >/dev/null 2>&1 || true
+        firewall_rule_added=false
+    fi
+
+    if [[ "$session_started" == true ]]; then
+        end_time=$(date +%s 2>/dev/null || printf '%s' "$session_start_time")
+        duration=$((end_time - session_start_time))
+
+        if ((exit_code == 0)); then
+            _openweb_log "INFO" "session_closed" "$session_user" "$session_port" "exited_cleanly" "$duration" || true
+            printf '[INFO] OpenWeb session closed successfully (duration: %ss).\n' "$duration"
+        elif ((exit_code == 130 || exit_code == 143)); then
+            _openweb_log "WARN" "session_interrupted" "$session_user" "$session_port" "error_${exit_code}" "$duration" || true
+            printf '[INFO] OpenWeb session closed (duration: %ss).\n' "$duration"
+        else
+            _openweb_log "WARN" "session_interrupted" "$session_user" "$session_port" "error_${exit_code}" "$duration" || true
+            printf '[WARN] OpenWeb session exited with code %s (duration: %ss).\n' "$exit_code" "$duration"
+        fi
+    fi
+
+    exit "$exit_code"
 }
 
 main() {
-    for cmd in ttyd ss shuf ufw ip bash; do
-        if ! command -v "$cmd" &>/dev/null; then
-            echo "[ERROR] '$cmd' is not installed on the system." >&2
-            exit 1
-        fi
-    done
-
-    local start_time
-    start_time=$(date +%s)
-    local port
-    port=$(_openweb_get_free_port)
-    local creds
-    read -r -a creds <<< "$(_openweb_make_credentials)"
-    local user="${creds[0]}"
-    local pass="${creds[1]}"
+    local firewall_status
     local local_ip
-    local_ip=$(_openweb_get_local_ip)
+    local session_password
 
-    echo "[INFO] Opening port $port in UFW for the local network $SUBNET..."
-    if ! sudo ufw allow proto tcp from "$SUBNET" to any port "$port" >/dev/null; then
-        echo "[ERROR] Could not open port $port in UFW." >&2
-        exit 1
+    _require_commands ttyd ss shuf ufw ip hostname sudo grep date mkdir sleep "$USER_SHELL"
+
+    if [[ ! -r /dev/urandom ]]; then
+        printf '[ERROR] Required random source is not readable: /dev/urandom\n' >&2
+        return 1
     fi
 
-    cleanup() {
-        local exit_code=$?
-        trap - INT TERM EXIT
-        local end_time
-        end_time=$(date +%s)
-        local duration=$((end_time - start_time))
+    if ! mkdir -p "$LOG_DIR"; then
+        printf '[ERROR] Could not create OpenWeb log directory: %s\n' "$LOG_DIR" >&2
+        return 1
+    fi
+    if ! : >> "$LOG_FILE"; then
+        printf '[ERROR] Could not write to OpenWeb log file: %s\n' "$LOG_FILE" >&2
+        return 1
+    fi
 
-        echo -e "\n[INFO] Closing port $port in UFW..."
-        sudo ufw delete allow proto tcp from "$SUBNET" to any port "$port" >/dev/null 2>&1 || true
+    session_start_time=$(date +%s)
+    if ! session_port=$(_openweb_get_free_port); then
+        printf '[ERROR] Could not select an available TCP port.\n' >&2
+        return 1
+    fi
+    if ! read -r session_user session_password < <(_openweb_make_credentials); then
+        printf '[ERROR] Could not generate session credentials.\n' >&2
+        return 1
+    fi
+    local_ip=$(_openweb_get_local_ip)
 
-        if [[ $exit_code -eq 0 ]]; then
-            _openweb_log "INFO" "session_closed" "$user" "$port" "exited_cleanly" "$duration"
-            echo "[INFO] Session closed successfully (Duration: ${duration}s)."
-        else
-            _openweb_log "WARN" "session_interrupted" "$user" "$port" "error_${exit_code}" "$duration"
-            echo "[WARN] Session interrupted or closed with code ${exit_code} (Duration: ${duration}s)."
+    if ! sudo -v; then
+        printf '[ERROR] Sudo authentication failed.\n' >&2
+        return 1
+    fi
+    if ! firewall_status=$(LC_ALL=C sudo -n ufw status); then
+        printf '[ERROR] Could not read UFW status.\n' >&2
+        return 1
+    fi
+
+    trap _openweb_cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    while sudo -n true; do
+        sleep 50
+    done 2>/dev/null &
+    sudo_keepalive_pid=$!
+
+    if _firewall_rule_exists "$firewall_status" "${session_port}/tcp"; then
+        printf '[INFO] Reusing existing UFW rule for TCP port %s on %s.\n' "$session_port" "$SUBNET"
+    else
+        printf '[INFO] Opening temporary TCP port %s in UFW for %s...\n' "$session_port" "$SUBNET"
+        firewall_rule_added=true
+        if ! sudo -n ufw allow proto tcp from "$SUBNET" to any port "$session_port" >/dev/null; then
+            printf '[ERROR] Could not open TCP port %s in UFW.\n' "$session_port" >&2
+            return 1
         fi
-    }
-    trap cleanup INT TERM EXIT
+    fi
 
-    _openweb_log "INFO" "session_started" "$user" "$port" "started" "0"
+    _openweb_log "INFO" "session_started" "$session_user" "$session_port" "started" "0"
+    session_started=true
 
-    echo "=========================================="
-    echo "  OPENWEB SESSION CREDENTIALS"
-    echo "=========================================="
-    echo "  URL:         http://${local_ip}:${port}"
-    echo "  TTYD USER:   $user"
-    echo "  PASS:        $pass"
-    echo "  PORT:        $port"
-    echo "  ALLOWED NET: $SUBNET"
-    echo "=========================================="
-    echo " Press Ctrl+C to log out."
-    echo "------------------------------------------"
+    printf '%s\n' '=========================================='
+    printf '%s\n' '  OPENWEB SESSION CREDENTIALS'
+    printf '%s\n' '=========================================='
+    printf '  URL:         http://%s:%s\n' "$local_ip" "$session_port"
+    printf '  TTYD user:   %s\n' "$session_user"
+    printf '  Password:    %s\n' "$session_password"
+    printf '  Port:        %s\n' "$session_port"
+    printf '  Allowed net: %s\n' "$SUBNET"
+    printf '%s\n' '=========================================='
+    printf '[INFO] Starting OpenWeb session. Press Ctrl+C to stop.\n'
 
-    ttyd -p "$port" -c "$user:$pass" --writable bash
+    ttyd -p "$session_port" -c "$session_user:$session_password" --writable "$USER_SHELL"
 }
 
 main "$@"

@@ -1,37 +1,74 @@
 #!/bin/bash
+set -euo pipefail
 
-# Configuration file
-CONFIG_FILE="$HOME/.config/llama-server.conf"
+# Configuration
+readonly CONFIG_FILE="${HOME}/.config/llama-server.conf"
 
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo "Error: Configuration file not found at $CONFIG_FILE" >&2
-    exit 1
-fi
+_resolve_model_path() {
+    local path="$1"
 
-# Load configuration
-source "$CONFIG_FILE"
+    case "$path" in
+        "~") path="$HOME" ;;
+        "~/"*) path="${HOME}/${path:2}" ;;
+    esac
 
-# Resolve model path (supports ~ and environment variables)
-RESOLVED_MODEL_PATH=$(eval echo "$MODEL_PATH")
+    printf '%s\n' "$path"
+}
 
-if [ ! -f "$RESOLVED_MODEL_PATH" ]; then
-    echo "Error: Model file does not exist at: $RESOLVED_MODEL_PATH" >&2
-    echo "Please verify the path in $CONFIG_FILE" >&2
-    exit 1
-fi
+main() {
+    local setting
+    local resolved_model_path
 
-echo "Starting Llama.cpp with configuration from: $CONFIG_FILE"
-echo "Model: $RESOLVED_MODEL_PATH"
-echo "Port: $PORT | Threads: $THREADS | GPU Layers: $GPU_LAYERS | Context: $CTX_SIZE"
-echo "--------------------------------------------------"
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        printf '[ERROR] Configuration file not found: %s\n' "$CONFIG_FILE" >&2
+        return 1
+    fi
 
-# Run the server with optimized parameters
-exec llama-server \
-    -m "$RESOLVED_MODEL_PATH" \
-    --port "$PORT" \
-    -t "$THREADS" \
-    -ngl "$GPU_LAYERS" \
-    -c "$CTX_SIZE" \
-    --flash-attn on \
-    --host 127.0.0.1 \
-    "$@"
+    if ! command -v llama-server >/dev/null 2>&1; then
+        printf "[ERROR] Required command 'llama-server' is not installed.\n" >&2
+        return 1
+    fi
+
+    # shellcheck source=/dev/null
+    source "$CONFIG_FILE"
+
+    for setting in MODEL_PATH PORT THREADS GPU_LAYERS CTX_SIZE; do
+        if [[ -z "${!setting:-}" ]]; then
+            printf '[ERROR] Required setting %s is missing from %s.\n' "$setting" "$CONFIG_FILE" >&2
+            return 1
+        fi
+    done
+
+    resolved_model_path=$(_resolve_model_path "$MODEL_PATH")
+    if [[ ! -f "$resolved_model_path" ]]; then
+        printf '[ERROR] Model file not found: %s\n' "$resolved_model_path" >&2
+        printf '[ERROR] Verify MODEL_PATH in %s.\n' "$CONFIG_FILE" >&2
+        return 1
+    fi
+
+    printf '%s\n' '=========================================='
+    printf '%s\n' '  LLAMA.CPP SERVER'
+    printf '%s\n' '=========================================='
+    printf '  Model:      %s\n' "$resolved_model_path"
+    printf '  Port:       %s\n' "$PORT"
+    printf '  Threads:    %s\n' "$THREADS"
+    printf '  GPU layers: %s\n' "$GPU_LAYERS"
+    printf '  Context:    %s\n' "$CTX_SIZE"
+    printf '%s\n' '=========================================='
+    printf '[INFO] Starting llama-server.\n'
+
+    if ! exec llama-server \
+        -m "$resolved_model_path" \
+        --port "$PORT" \
+        -t "$THREADS" \
+        -ngl "$GPU_LAYERS" \
+        -c "$CTX_SIZE" \
+        --flash-attn on \
+        --host 127.0.0.1 \
+        "$@"; then
+        printf '[ERROR] Failed to start llama-server.\n' >&2
+        return 1
+    fi
+}
+
+main "$@"
