@@ -19,21 +19,15 @@ runtime_refresh_state
 show_help() {
     printf 'Usage: %s [option]\n\n' "$0"
     printf '%s\n' 'Options:'
-    printf '%s\n' '  --import    Import current local configurations into the repository'
     printf '%s\n' '  --install   Run the interactive installation wizard (default)'
     printf '%s\n' '  --help      Show this help message'
 }
 
 main() {
-    local workflow
     local final_status=0
 
     case "${1:-}" in
-        --import)
-            workflow="import"
-            ;;
         --install|"")
-            workflow="install"
             ;;
         --help)
             show_help
@@ -46,14 +40,11 @@ main() {
             ;;
     esac
 
-    if ! runtime_begin "${workflow}"; then
+    if ! runtime_begin "install"; then
         return 1
     fi
 
-    case "${workflow}" in
-        import) import_configs ;;
-        install) run_wizard ;;
-    esac
+    run_wizard
 
     runtime_finish || final_status=$?
     trap - ERR

@@ -109,22 +109,6 @@ assert_file_contains "${backup_dir}/home/.config/omarchy/branding/old.txt" "old 
     assert_file_contains "${BACKUP_DIR}/home/target" "relative xdg backup"
 )
 
-# Back up a repository destination before importing a replacement.
-DOTFILES_DIR="${TEST_ROOT}/repository/dotfiles"
-mkdir -p "${DOTFILES_DIR}/sample" "${HOME}/import-source"
-printf 'repository old\n' > "${DOTFILES_DIR}/sample/value"
-printf 'local new\n' > "${HOME}/import-source/value"
-_import_config "test" "sample" "${HOME}/import-source" "${DOTFILES_DIR}/sample"
-assert_file_contains "${DOTFILES_DIR}/sample/value" "local new"
-assert_file_contains "${backup_dir}/repository/dotfiles/sample/value" "repository old"
-
-# A live symlink back to the repository must never delete its own source.
-ln -s "${DOTFILES_DIR}/sample" "${HOME}/same-source"
-if _import_config "test" "sample" "${HOME}/same-source" "${DOTFILES_DIR}/sample"; then
-    fail "self-referential import was not skipped"
-fi
-assert_file_contains "${DOTFILES_DIR}/sample/value" "local new"
-
 machine_home='/ho''me/posesco'
 if ! git -C "${REPO_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     fail "machine-specific path check requires a Git checkout"
@@ -133,4 +117,4 @@ if git -C "${REPO_DIR}" grep -nF "${machine_home}"; then
     fail "tracked files still contain a machine-specific home path"
 fi
 
-printf 'PASS: personal artifact mappings, portable linking, import safety, and backups\n'
+printf 'PASS: personal artifact mappings, portable linking, and backups\n'

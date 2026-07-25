@@ -24,7 +24,7 @@ source "${REPO_DIR}/install.sh"
 [[ ! -e "${HOME}" ]] || fail "sourcing created HOME"
 [[ ! -e "${XDG_STATE_HOME}" ]] || fail "sourcing created state directories"
 declare -F run_wizard link_dotfile >/dev/null || fail "installer modules were not loaded"
-for removed_function in download_models process_templates _resolve_template; do
+for removed_function in download_models process_templates _resolve_template import_configs _import_config; do
     if declare -F "${removed_function}" >/dev/null; then
         fail "removed function ${removed_function} was loaded"
     fi
@@ -32,8 +32,22 @@ done
 [[ ! -e "${REPO_DIR}/terraform" ]] || fail "Terraform directory still exists"
 [[ ! -e "${REPO_DIR}/models.conf" && ! -e "${REPO_DIR}/lib/models.sh" ]] || fail "model automation files still exist"
 
+assert_install_dispatch() (
+    local -a calls=()
+    runtime_begin() { calls+=("runtime_begin:$1"); }
+    run_wizard() { calls+=("run_wizard"); }
+    runtime_finish() { calls+=("runtime_finish"); }
+
+    main "$@"
+    [[ "${calls[*]}" == "runtime_begin:install run_wizard runtime_finish" ]] || fail "install workflow dispatch changed"
+)
+
+assert_install_dispatch
+assert_install_dispatch --install
+
 help_output=$(show_help)
 [[ "${help_output}" != *"--models"* ]] || fail "help still advertises the removed models workflow"
+[[ "${help_output}" != *"--import"* ]] || fail "help still advertises the removed import workflow"
 [[ ! -e "${XDG_STATE_HOME}" ]] || fail "help created state directories"
 
 HOME="${HOME}" XDG_STATE_HOME="${XDG_STATE_HOME}" "${REPO_DIR}/install.sh" --help >/dev/null
@@ -42,6 +56,10 @@ if HOME="${HOME}" XDG_STATE_HOME="${XDG_STATE_HOME}" "${REPO_DIR}/install.sh" --
     fail "invalid option returned zero"
 fi
 [[ ! -e "${XDG_STATE_HOME}" ]] || fail "invalid option created state directories"
+if HOME="${HOME}" XDG_STATE_HOME="${XDG_STATE_HOME}" "${REPO_DIR}/install.sh" --import >/dev/null 2>&1; then
+    fail "removed import option returned zero"
+fi
+[[ ! -e "${XDG_STATE_HOME}" ]] || fail "removed import option created state or log directories"
 if HOME="${HOME}" XDG_STATE_HOME="${XDG_STATE_HOME}" "${REPO_DIR}/install.sh" --models >/dev/null 2>&1; then
     fail "removed models option returned zero"
 fi

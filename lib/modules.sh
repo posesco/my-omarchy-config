@@ -80,53 +80,6 @@ _install_module() {
     esac
 }
 
-import_configs() {
-    log_info "Starting import of local configurations..."
-    setup_environment
-
-    local imported_any=false
-    local failures_before=${RUN_FAILURES}
-    local -a mappings=()
-    local mod targets mapping repo_name home_rel local_path repo_path import_status
-
-    for mod in "${MODULES_LIST[@]}"; do
-        targets=${MODULE_TARGETS[$mod]}
-        if [ -z "${targets}" ]; then
-            continue
-        fi
-
-        read -r -a mappings <<< "${targets}"
-        for mapping in "${mappings[@]}"; do
-            repo_name=${mapping%%:*}
-            home_rel=${mapping#*:}
-            local_path="${HOME}/${home_rel}"
-            repo_path="${DOTFILES_DIR}/${repo_name}"
-
-            if _import_config "${mod}" "${repo_name}" "${local_path}" "${repo_path}"; then
-                imported_any=true
-            else
-                import_status=$?
-                if [ "${import_status}" -gt 1 ]; then
-                    runtime_add_failure
-                fi
-            fi
-        done
-    done
-
-    if [ "${imported_any}" = true ]; then
-        printf '\n==============================================\n'
-        if [ "${RUN_FAILURES}" -eq "${failures_before}" ]; then
-            log_success "Import completed successfully!"
-        else
-            log_warn "Import completed with failures."
-        fi
-        printf '==============================================\n\n'
-    else
-        log_warn "No local configurations found to import."
-    fi
-    report_backup_location
-}
-
 run_wizard() {
     setup_environment
 
