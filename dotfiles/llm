@@ -1,41 +1,31 @@
 #!/bin/bash
 
-# Archivo de configuración
+# Configuration file
 CONFIG_FILE="$HOME/.config/llama-server.conf"
 
 if [ ! -f "$CONFIG_FILE" ]; then
-    echo "Error: No se encontró el archivo de configuración en $CONFIG_FILE" >&2
+    echo "Error: Configuration file not found at $CONFIG_FILE" >&2
     exit 1
 fi
 
-# Cargar la configuración
+# Load configuration
 source "$CONFIG_FILE"
 
-# Resolver la ruta del modelo (por si tiene ~ o variables de entorno)
+# Resolve model path (supports ~ and environment variables)
 RESOLVED_MODEL_PATH=$(eval echo "$MODEL_PATH")
 
 if [ ! -f "$RESOLVED_MODEL_PATH" ]; then
-    echo "Error: El archivo de modelo no existe en: $RESOLVED_MODEL_PATH" >&2
-    echo "Por favor, verificá la ruta en $CONFIG_FILE" >&2
+    echo "Error: Model file does not exist at: $RESOLVED_MODEL_PATH" >&2
+    echo "Please verify the path in $CONFIG_FILE" >&2
     exit 1
 fi
 
-echo "Iniciando Llama.cpp con la configuración de: $CONFIG_FILE"
-echo "Modelo: $RESOLVED_MODEL_PATH"
-echo "Puerto: $PORT | Hilos: $THREADS | GPU Layers: $GPU_LAYERS | Contexto: $CTX_SIZE"
+echo "Starting Llama.cpp with configuration from: $CONFIG_FILE"
+echo "Model: $RESOLVED_MODEL_PATH"
+echo "Port: $PORT | Threads: $THREADS | GPU Layers: $GPU_LAYERS | Context: $CTX_SIZE"
 echo "--------------------------------------------------"
 
-# Sincronizar automáticamente el modelo por defecto en Fabric
-FABRIC_ENV="$HOME/.config/fabric/.env"
-if [ -f "$FABRIC_ENV" ]; then
-    MODEL_NAME=$(basename "$RESOLVED_MODEL_PATH")
-    if grep -q "^DEFAULT_MODEL=" "$FABRIC_ENV"; then
-        sed -i "s/^DEFAULT_MODEL=.*/DEFAULT_MODEL=$MODEL_NAME/" "$FABRIC_ENV"
-        echo "Fabric sincronizado: modelo por defecto actualizado a '$MODEL_NAME'"
-    fi
-fi
-
-# Ejecutar el servidor con los parámetros optimizados
+# Run the server with optimized parameters
 exec llama-server \
     -m "$RESOLVED_MODEL_PATH" \
     --port "$PORT" \

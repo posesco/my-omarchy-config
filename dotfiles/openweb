@@ -1,0 +1,116 @@
+#!/bin/bash
+set -euo pipefail
+
+# Configuration
+OPENWEB_DIR="${OPENWEB_DIR:-${HOME}/.local/share/openweb}"
+LOG_DIR="${OPENWEB_DIR}/logs"
+LOG_FILE="${LOG_FILE:-${LOG_DIR}/openweb.log}"
+SUBNET="192.168.1.0/24"
+USER_SHELL="bash"
+
+mkdir -p "$LOG_DIR"
+
+_openweb_log() {
+    local level="$1"
+    local event="$2"
+    local ttyd_user="${3:-unknown}"
+    local port="${4:-0}"
+    local status="${5:-unknown}"
+    local duration="${6:-0}"
+    local ts
+    ts=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+    
+    echo "ts=${ts} level=${level} event=${event} user=${ttyd_user} port=${port} status=${status} duration_s=${duration}" >> "$LOG_FILE"
+}
+
+_openweb_get_free_port() {
+    local port
+    while true; do
+        port=$(shuf -i 49152-65535 -n 1)
+        if ! ss -tunl | grep -q ":${port} "; then
+            echo "$port"
+            return 0
+        fi
+    done
+}
+
+_openweb_make_credentials() {
+    local user
+    local pass
+    user=$(LC_ALL=C tr -dc 'a-z' < /dev/urandom | head -c 6)
+    pass=$(LC_ALL=C tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 10)
+    echo "$user $pass"
+}
+
+_openweb_get_local_ip() {
+    local ip
+    ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7}')
+    if [[ -z "$ip" ]]; then
+        ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    fi
+    echo "${ip:-127.0.0.1}"
+}
+
+main() {
+    for cmd in ttyd ss shuf ufw ip bash; do
+        if ! command -v "$cmd" &>/dev/null; then
+            echo "[ERROR] '$cmd' is not installed on the system." >&2
+            exit 1
+        fi
+    done
+
+    local start_time
+    start_time=$(date +%s)
+    local port
+    port=$(_openweb_get_free_port)
+    local creds
+    read -r -a creds <<< "$(_openweb_make_credentials)"
+    local user="${creds[0]}"
+    local pass="${creds[1]}"
+    local local_ip
+    local_ip=$(_openweb_get_local_ip)
+
+    echo "[INFO] Opening port $port in UFW for the local network $SUBNET..."
+    if ! sudo ufw allow proto tcp from "$SUBNET" to any port "$port" >/dev/null; then
+        echo "[ERROR] Could not open port $port in UFW." >&2
+        exit 1
+    fi
+
+    cleanup() {
+        local exit_code=$?
+        trap - INT TERM EXIT
+        local end_time
+        end_time=$(date +%s)
+        local duration=$((end_time - start_time))
+
+        echo -e "\n[INFO] Closing port $port in UFW..."
+        sudo ufw delete allow proto tcp from "$SUBNET" to any port "$port" >/dev/null 2>&1 || true
+
+        if [[ $exit_code -eq 0 ]]; then
+            _openweb_log "INFO" "session_closed" "$user" "$port" "exited_cleanly" "$duration"
+            echo "[INFO] Session closed successfully (Duration: ${duration}s)."
+        else
+            _openweb_log "WARN" "session_interrupted" "$user" "$port" "error_${exit_code}" "$duration"
+            echo "[WARN] Session interrupted or closed with code ${exit_code} (Duration: ${duration}s)."
+        fi
+    }
+    trap cleanup INT TERM EXIT
+
+    _openweb_log "INFO" "session_started" "$user" "$port" "started" "0"
+
+    echo "=========================================="
+    echo "  OPENWEB SESSION CREDENTIALS"
+    echo "=========================================="
+    echo "  URL:         http://${local_ip}:${port}"
+    echo "  TTYD USER:   $user"
+    echo "  PASS:        $pass"
+    echo "  PORT:        $port"
+    echo "  ALLOWED NET: $SUBNET"
+    echo "=========================================="
+    echo " Press Ctrl+C to log out."
+    echo "------------------------------------------"
+
+    ttyd -p "$port" -c "$user:$pass" --writable bash
+}
+
+main "$@"
